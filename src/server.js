@@ -1,9 +1,18 @@
+const http = require('http');
 const app = require('./app');
 const { connectDB } = require('./config/database');
 const { User, Permission } = require('./models/index');
+const { setIO } = require('./socket');
 require('dotenv').config();
 
-const PORT = 8000;
+let SocketIO;
+try {
+    SocketIO = require('socket.io').Server;
+} catch (e) {
+    SocketIO = null;
+}
+
+const PORT = process.env.PORT || 8000;
 
 const seedPermissions = async () => {
     const defaultPermissions = [
@@ -53,9 +62,34 @@ const startServer = async () => {
     await seedPermissions();
     await seedAdmin();
 
-    app.listen(PORT, () => {
-        console.log(`Server is running on port ${PORT}`);
-    });
+    const httpServer = http.createServer(app);
+
+    if (SocketIO) {
+        const io = new SocketIO(httpServer, {
+            cors: { origin: '*', methods: ['GET', 'POST'] }
+        });
+        io.on('connection', (socket) => {
+            socket.on('bookings:subscribe', (date) => {
+                const dateStr = date && String(date).trim().slice(0, 10);
+                if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) socket.join(`bookings:${dateStr}`);
+            });
+            socket.on('bookings:unsubscribe', (date) => {
+                const dateStr = date && String(date).trim().slice(0, 10);
+                if (dateStr) socket.leave(`bookings:${dateStr}`);
+            });
+        });
+        setIO(io);
+        httpServer.listen(PORT, () => {
+            console.log(`Server is running on port ${PORT}`);
+            console.log('Socket.io enabled for real-time booking updates.');
+        });
+    } else {
+        setIO(null);
+        httpServer.listen(PORT, () => {
+            console.log(`Server is running on port ${PORT}`);
+            console.log('ℹ️  Install socket.io for real-time updates: npm install socket.io');
+        });
+    }
 };
 
 startServer();

@@ -2,23 +2,61 @@ const { Booking, IncomeEntry, Expense } = require('../models/index');
 const { Op } = require('sequelize');
 const sequelize = require('sequelize');
 
-// Helpers: start/end of month from YYYY-MM
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const MONTH_REGEX = /^\d{4}-\d{2}$/;
+
+/** نطاق شهر واحد: start, end, periodLabel */
 function getMonthRange(monthStr) {
-    if (!monthStr || !/^\d{4}-\d{2}$/.test(monthStr)) {
+    if (!monthStr || !MONTH_REGEX.test(monthStr)) {
         const now = new Date();
         monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     }
     const [y, m] = monthStr.split('-').map(Number);
     const start = new Date(y, m - 1, 1);
     const end = new Date(y, m, 0, 23, 59, 59, 999);
-    return { start, end, month: monthStr };
+    return { start, end, periodLabel: monthStr };
 }
 
-// GET /api/accounts/income/bookings?month=YYYY-MM — دخل الحجوزات لشهر: تجميع باسم العميل + التوتال
+/**
+ * نطاق فترة مرن من query:
+ * - startDate + endDate (YYYY-MM-DD) → مجموعة أيام
+ * - startMonth + endMonth (YYYY-MM) → مجموعة شهور
+ * - month (YYYY-MM) → شهر واحد (كما هو حالياً)
+ * - بدون شيء → الشهر الحالي
+ */
+function getPeriodRange(query) {
+    const q = query || {};
+    const startDateStr = String(q.startDate || '').trim().slice(0, 10);
+    const endDateStr = String(q.endDate || '').trim().slice(0, 10);
+    const startMonthStr = String(q.startMonth || '').trim().slice(0, 7);
+    const endMonthStr = String(q.endMonth || '').trim().slice(0, 7);
+    const monthStr = String(q.month || '').trim().slice(0, 7);
+
+    if (startDateStr && endDateStr && DATE_ONLY_REGEX.test(startDateStr) && DATE_ONLY_REGEX.test(endDateStr)) {
+        const start = new Date(startDateStr + 'T00:00:00.000Z');
+        const end = new Date(endDateStr + 'T23:59:59.999Z');
+        if (start.getTime() <= end.getTime()) {
+            return { start, end, periodLabel: `${startDateStr} → ${endDateStr}` };
+        }
+    }
+
+    if (startMonthStr && endMonthStr && MONTH_REGEX.test(startMonthStr) && MONTH_REGEX.test(endMonthStr)) {
+        const [sy, sm] = startMonthStr.split('-').map(Number);
+        const [ey, em] = endMonthStr.split('-').map(Number);
+        const start = new Date(sy, sm - 1, 1);
+        const end = new Date(ey, em, 0, 23, 59, 59, 999);
+        if (start.getTime() <= end.getTime()) {
+            return { start, end, periodLabel: `${startMonthStr} → ${endMonthStr}` };
+        }
+    }
+
+    return getMonthRange(monthStr);
+}
+
+// GET /api/accounts/income/bookings — دخل الحجوزات: شهر أو فترة (month | startDate+endDate | startMonth+endMonth)
 exports.getIncomeFromBookings = async (req, res, next) => {
     try {
-        const { month } = req.query;
-        const { start, end, month: monthLabel } = getMonthRange(month);
+        const { start, end, periodLabel } = getPeriodRange(req.query);
 
         const list = await Booking.findAll({
             attributes: [
@@ -41,7 +79,7 @@ exports.getIncomeFromBookings = async (req, res, next) => {
         const total = rows.reduce((sum, r) => sum + r.amount, 0);
 
         res.status(200).json({
-            month: monthLabel,
+            period: periodLabel,
             byCustomer: rows,
             total: Math.round(total * 100) / 100
         });
@@ -79,11 +117,10 @@ exports.addManualIncome = async (req, res, next) => {
     }
 };
 
-// GET /api/accounts/income/manual?month=YYYY-MM — قائمة الدخل اليدوي لشهر
+// GET /api/accounts/income/manual — قائمة الدخل اليدوي: شهر أو فترة
 exports.getManualIncome = async (req, res, next) => {
     try {
-        const { month } = req.query;
-        const { start, end, month: monthLabel } = getMonthRange(month);
+        const { start, end, periodLabel } = getPeriodRange(req.query);
 
         const entries = await IncomeEntry.findAll({
             where: {
@@ -95,7 +132,7 @@ exports.getManualIncome = async (req, res, next) => {
         const total = entries.reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
 
         res.status(200).json({
-            month: monthLabel,
+            period: periodLabel,
             entries,
             total: Math.round(total * 100) / 100
         });
@@ -104,11 +141,10 @@ exports.getManualIncome = async (req, res, next) => {
     }
 };
 
-// GET /api/accounts/expenses?month=YYYY-MM — قائمة المصروفات لشهر
+// GET /api/accounts/expenses — شهر أو فترة — قائمة المصروفات لشهر
 exports.getExpenses = async (req, res, next) => {
     try {
-        const { month } = req.query;
-        const { start, end, month: monthLabel } = getMonthRange(month);
+        const { start, end, periodLabel } = getPeriodRange(req.query);
 
         const expenses = await Expense.findAll({
             where: {
@@ -120,7 +156,7 @@ exports.getExpenses = async (req, res, next) => {
         const total = expenses.reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
 
         res.status(200).json({
-            month: monthLabel,
+            period: periodLabel,
             expenses,
             total: Math.round(total * 100) / 100
         });
@@ -159,11 +195,10 @@ exports.addExpense = async (req, res, next) => {
     }
 };
 
-// GET /api/accounts/summary?month=YYYY-MM — ملخص: إجمالي دخل (حجوزات + يدوي)، إجمالي مصروفات، الرصيد
+// GET /api/accounts/summary — ملخص: شهر أو فترة (دخل حجوزات + يدوي، مصروفات، رصيد)
 exports.getSummary = async (req, res, next) => {
     try {
-        const { month } = req.query;
-        const { start, end, month: monthLabel } = getMonthRange(month);
+        const { start, end, periodLabel } = getPeriodRange(req.query);
 
         const bookingWhere = {
             appointmentDate: { [Op.between]: [start, end] },
@@ -183,7 +218,7 @@ exports.getSummary = async (req, res, next) => {
         const balance = totalIncome - totalExpenses;
 
         res.status(200).json({
-            month: monthLabel,
+            period: periodLabel,
             incomeFromBookings: Math.round(incomeFromBookings * 100) / 100,
             manualIncome: Math.round(manualIncome * 100) / 100,
             totalIncome: Math.round(totalIncome * 100) / 100,

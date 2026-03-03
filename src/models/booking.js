@@ -49,9 +49,38 @@ const Booking = sequelize.define('Booking', {
         type: DataTypes.ENUM('waiting', 'done'),
         defaultValue: 'waiting',
         allowNull: false
+    },
+    // Slot-based booking (working hours): date + 1-hour slot
+    patientId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: 'FK to Patient for slot-based bookings'
+    },
+    slotDate: {
+        type: DataTypes.DATEONLY,
+        allowNull: true,
+        comment: 'تاريخ الموعد YYYY-MM-DD'
+    },
+    timeSlot: {
+        type: DataTypes.STRING(5),
+        allowNull: true,
+        comment: 'مثل 10:00 (ساعة كاملة)'
+    },
+    // الحجز الأونلاين: التاريخ والوقت المفضل (يختاره المريض)
+    preferredDate: {
+        type: DataTypes.DATEONLY,
+        allowNull: true,
+        comment: 'التاريخ المفضل للحجز الأونلاين YYYY-MM-DD'
+    },
+    preferredTime: {
+        type: DataTypes.STRING(5),
+        allowNull: true,
+        comment: 'الوقت المفضل للحجز الأونلاين مثل 10:00'
     }
 }, {
     timestamps: true
+    // Indexes (slotDate, timeSlot) and (patientId, slotDate, timeSlot) are created by runSlotBookingMigration in config/database.js
+    // so that columns exist before index creation; do not add indexes here or sync() fails when columns are missing.
 });
 
 module.exports = Booking;

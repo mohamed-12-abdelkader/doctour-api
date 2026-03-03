@@ -7,6 +7,9 @@ const authRoutes = require('./routes/authRoutes');
 const staffRoutes = require('./routes/staffRoutes');
 const bookingRoutes = require('./routes/bookingRoutes');
 const accountRoutes = require('./routes/accountRoutes');
+const workingDayRoutes = require('./routes/workingDayRoutes');
+const patientRoutes = require('./routes/patientRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
@@ -28,6 +31,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api/admin/staff', staffRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/accounts', accountRoutes);
+app.use('/api/admin/working-days', workingDayRoutes);
+app.use('/api/patients', patientRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // 404 Handler
 app.use((req, res, next) => {

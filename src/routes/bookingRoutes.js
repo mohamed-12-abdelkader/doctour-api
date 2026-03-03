@@ -1,10 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const bookingController = require('../controllers/bookingController');
+const bookingSlotController = require('../controllers/bookingSlotController');
 const reportController = require('../controllers/reportController');
 const { protect } = require('../middlewares/authMiddleware');
 const { hasPermission } = require('../middlewares/permissionMiddleware');
 const { admin } = require('../middlewares/roleMiddleware');
+const upload = require('../middlewares/uploadMiddleware');
+
+// Slot-based booking (working hours): public read slots, public create/cancel
+router.get('/available-slots', bookingSlotController.getAvailableSlots);
+router.post('/slots', bookingSlotController.createSlotBooking);
+router.patch('/slots/:id/cancel', bookingSlotController.cancelSlotBooking);
 
 // Public Route: Make an online booking
 router.post('/online', bookingController.createBooking);
@@ -41,10 +48,14 @@ router.get('/all', protect, (req, res, next) => {
 // Admin only: Update examination status (حالة الكشف — تم الكشف / في الانتظار)
 router.patch('/:id/examination-status', protect, admin, bookingController.updateExaminationStatus);
 
-// Admin only: Patient report (تقرير المريض — الحالة المرضية + الأدوية)
-router.post('/:id/report', protect, admin, reportController.createReport);
-router.get('/:id/report', protect, admin, reportController.getReport);
-router.put('/:id/report', protect, admin, reportController.updateReport);
+// Admin only: Patient reports — أكثر من تقرير لنفس الحجز
+// Content-Type: multipart/form-data | field name for image: 'prescription'
+router.post('/:id/reports', protect, admin, upload.single('prescription'), reportController.createReport);
+router.get('/:id/reports', protect, admin, reportController.getReports);
+router.get('/:id/reports/:reportId', protect, admin, reportController.getReport);
+router.put('/:id/reports/:reportId', protect, admin, upload.single('prescription'), reportController.updateReport);
+router.delete('/:id/reports/:reportId', protect, admin, reportController.deleteReport);
+router.delete('/:id/reports/:reportId/prescription', protect, admin, reportController.deletePrescriptionImage);
 
 // Protected Routes: Update and cancel bookings
 // Requires 'manage_daily_bookings' permission

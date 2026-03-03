@@ -90,18 +90,53 @@ const runAppointmentDateNullableMigration = async () => {
   }
 };
 
+// Migration: slot-based booking — patientId, slotDate, timeSlot on Bookings
+const runSlotBookingMigration = async () => {
+  try {
+    const cols = [
+      { name: 'patientId', sql: 'ADD COLUMN "patientId" INTEGER NULL REFERENCES "Patients"(id) ON DELETE SET NULL' },
+      { name: 'slotDate', sql: 'ADD COLUMN "slotDate" DATE NULL' },
+      { name: 'timeSlot', sql: 'ADD COLUMN "timeSlot" VARCHAR(5) NULL' }
+    ];
+    for (const { name, sql } of cols) {
+      const [rows] = await sequelize.query(`
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'Bookings' AND column_name = '${name}'
+      `);
+      if (!rows || rows.length === 0) {
+        await sequelize.query(`ALTER TABLE "Bookings" ${sql};`);
+        console.log(`✅ Bookings.${name} added.`);
+      }
+    }
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS "bookings_slot_date_time"
+      ON "Bookings" ("slotDate", "timeSlot")
+      WHERE "slotDate" IS NOT NULL AND "timeSlot" IS NOT NULL;
+    `).catch(() => {});
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS "bookings_patient_slot"
+      ON "Bookings" ("patientId", "slotDate", "timeSlot")
+      WHERE "patientId" IS NOT NULL AND "slotDate" IS NOT NULL AND "timeSlot" IS NOT NULL;
+    `).catch(() => {});
+    console.log('✅ Slot booking migration applied.');
+  } catch (err) {
+    console.warn('⚠️ Slot booking migration skip:', err.message);
+  }
+};
+
 const connectDB = async () => {
   try {
     await sequelize.authenticate();
     console.log('✅ Database connected successfully.');
 
-    // Sync models - create tables if they don't exist
+    // Sync models - create tables if they don't exist (WorkingDay, Patient, etc.)
     await sequelize.sync({ alter: false });
     console.log('✅ Models synchronized.');
 
     await runExaminationStatusMigration();
     await runBookingAgeAndConsultationMigration();
     await runAppointmentDateNullableMigration();
+    await runSlotBookingMigration();
   } catch (error) {
     console.error('❌ Unable to connect to the database:', error);
     process.exit(1);

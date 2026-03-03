@@ -12,24 +12,24 @@ router.get('/', protect, hasPermission('manage_accounts'), (req, res) => {
     res.status(200).json({ message: 'Access granted to Accounts dashboard' });
 });
 
-// ——— دخل الحجوزات (تجميع شهر باسم العميل + التوتال)
-// GET /api/accounts/income/bookings?month=YYYY-MM
+// ——— دخل الحجوزات (تجميع باسم العميل + التوتال)
+// GET .../income/bookings?month=YYYY-MM | ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD | ?startMonth=YYYY-MM&endMonth=YYYY-MM
 router.get('/income/bookings', accountsAccess, accountController.getIncomeFromBookings);
 
-// ——— دخل يدوي (إضافة دخل: اسم العملية + المبلغ)
+// ——— دخل يدوي
 // POST /api/accounts/income — Body: { description, amount, entryDate? }
 router.post('/income', accountsAccess, accountController.addManualIncome);
-// GET /api/accounts/income/manual?month=YYYY-MM — قائمة الدخل اليدوي لشهر
+// GET .../income/manual — نفس خيارات الفترة أعلاه
 router.get('/income/manual', accountsAccess, accountController.getManualIncome);
 
-// ——— مصروفات (إضافة مصروف + قائمة شهر)
+// ——— مصروفات
 // POST /api/accounts/expenses — Body: { description, amount, expenseDate?, notes? }
 router.post('/expenses', accountsAccess, accountController.addExpense);
-// GET /api/accounts/expenses?month=YYYY-MM — قائمة المصروفات لشهر
+// GET .../expenses — نفس خيارات الفترة
 router.get('/expenses', accountsAccess, accountController.getExpenses);
 
-// ——— ملخص الحسابات لشهر
-// GET /api/accounts/summary?month=YYYY-MM — إجمالي دخل (حجوزات + يدوي)، مصروفات، رصيد
+// ——— ملخص الحسابات (دخل + مصروفات + رصيد)
+// GET .../summary — نفس خيارات الفترة
 router.get('/summary', accountsAccess, accountController.getSummary);
 
 module.exports = router;
