@@ -6,6 +6,8 @@ module.exports = {
     SLOT_FULL: 'هذا الموعد ممتلئ',
     ALL_SLOTS_FULL: 'مواعيد اليوم اكتملت',
     BOOKING_SLOTS_ENDED: 'انتهت مواعيد الحجز لليوم',
-    MAX_BOOKINGS_PER_SLOT: 10,
-    SLOT_DURATION_MINUTES: 60
+    // في نظام السلاطات الحالي: كل 10 دقائق → 6 سلاطات في الساعة
+    // لذلك يكون الحد الأقصى لحجز واحد فقط لكل سلات (موعد 10 دقائق).
+    MAX_BOOKINGS_PER_SLOT: 1,
+    SLOT_DURATION_MINUTES: 10
 };

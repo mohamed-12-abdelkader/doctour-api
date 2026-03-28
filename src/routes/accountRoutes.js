@@ -23,10 +23,22 @@ router.post('/income', accountsAccess, accountController.addManualIncome);
 router.get('/income/manual', accountsAccess, accountController.getManualIncome);
 
 // ——— مصروفات
-// POST /api/accounts/expenses — Body: { description, amount, expenseDate?, notes? }
+// POST /api/accounts/expenses — Body: { description, amount, date?, notes?, category_id, subcategory_id }
 router.post('/expenses', accountsAccess, accountController.addExpense);
 // GET .../expenses — نفس خيارات الفترة
 router.get('/expenses', accountsAccess, accountController.getExpenses);
+
+// ——— تصنيفات المصروفات (Categories)
+router.get('/expense-categories', accountsAccess, accountController.getExpenseCategories);
+router.post('/expense-categories', accountsAccess, accountController.addExpenseCategory);
+router.put('/expense-categories/:id', accountsAccess, accountController.updateExpenseCategory);
+router.delete('/expense-categories/:id', accountsAccess, accountController.deleteExpenseCategory);
+
+// ——— تصنيفات المصروفات الفرعية (Subcategories)
+router.get('/expense-subcategories', accountsAccess, accountController.getExpenseSubcategories);
+router.post('/expense-subcategories', accountsAccess, accountController.addExpenseSubcategory);
+router.put('/expense-subcategories/:id', accountsAccess, accountController.updateExpenseSubcategory);
+router.delete('/expense-subcategories/:id', accountsAccess, accountController.deleteExpenseSubcategory);
 
 // ——— ملخص الحسابات (دخل + مصروفات + رصيد)
 // GET .../summary — نفس خيارات الفترة

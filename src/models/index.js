@@ -9,6 +9,8 @@ const PatientReport = require('./patientReport');
 const ReportMedication = require('./reportMedication');
 const IncomeEntry = require('./incomeEntry');
 const Expense = require('./expense');
+const ExpenseCategory = require('./expenseCategory');
+const ExpenseSubcategory = require('./expenseSubcategory');
 const Notification = require('./Notification');
 
 const UserPermission = sequelize.define('UserPermission', {
@@ -45,4 +47,25 @@ PatientReport.belongsTo(Booking, { foreignKey: 'bookingId' });
 PatientReport.hasMany(ReportMedication, { foreignKey: 'reportId', as: 'medications' });
 ReportMedication.belongsTo(PatientReport, { foreignKey: 'reportId' });
 
-module.exports = { User, Permission, UserPermission, Booking, Patient, WorkingDay, PatientReport, ReportMedication, IncomeEntry, Expense, Notification };
+// Expense classification associations
+ExpenseCategory.hasMany(ExpenseSubcategory, { foreignKey: 'categoryId', as: 'subcategories' });
+ExpenseSubcategory.belongsTo(ExpenseCategory, { foreignKey: 'categoryId', as: 'category' });
+
+Expense.belongsTo(ExpenseCategory, { foreignKey: 'categoryId', as: 'category' });
+Expense.belongsTo(ExpenseSubcategory, { foreignKey: 'subcategoryId', as: 'subcategory' });
+
+module.exports = {
+    User,
+    Permission,
+    UserPermission,
+    Booking,
+    Patient,
+    WorkingDay,
+    PatientReport,
+    ReportMedication,
+    IncomeEntry,
+    Expense,
+    ExpenseCategory,
+    ExpenseSubcategory,
+    Notification
+};

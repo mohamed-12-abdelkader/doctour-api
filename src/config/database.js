@@ -124,6 +124,104 @@ const runSlotBookingMigration = async () => {
   }
 };
 
+// Migration: Expenses classification (categories + subcategories) tables + columns
+const runExpensesClassificationMigration = async () => {
+  try {
+    // Create category/subcategory tables (idempotent)
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS expense_categories (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL UNIQUE,
+        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS expense_subcategories (
+        id SERIAL PRIMARY KEY,
+        "categoryId" INTEGER NOT NULL REFERENCES expense_categories(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE ("categoryId", name)
+      );
+    `);
+
+    // Add columns to existing Expenses table (keep them nullable for backward compatibility)
+    await sequelize.query(`
+      ALTER TABLE "Expenses" ADD COLUMN IF NOT EXISTS "categoryId" INTEGER;
+    `);
+    await sequelize.query(`
+      ALTER TABLE "Expenses" ADD COLUMN IF NOT EXISTS "subcategoryId" INTEGER;
+    `);
+
+    // Seed default categories + subcategories (only if missing)
+    const seedSql = `
+      -- Categories
+      INSERT INTO expense_categories (name)
+      SELECT * FROM (VALUES
+        ('مصروفات ثابتة (Fixed Costs)'),
+        ('مصروفات متغيرة (Variable Costs)'),
+        ('التسويق (Marketing Costs)'),
+        ('مصروفات مالية وقانونية'),
+        ('مصروفات أخرى (Other Expenses)')
+      ) AS t(name)
+      WHERE NOT EXISTS (SELECT 1 FROM expense_categories c WHERE c.name = t.name);
+
+      -- Subcategories
+      INSERT INTO expense_subcategories ("categoryId", name)
+      SELECT c.id, s.name
+      FROM expense_categories c
+      JOIN (VALUES
+        -- Fixed Costs
+        ('الإيجار', 'مصروفات ثابتة (Fixed Costs)'),
+        ('المرتبات (ريسبشن – تمريض – مساعد دكتور)', 'مصروفات ثابتة (Fixed Costs)'),
+        ('الفواتير (كهرباء – مياه – إنترنت)', 'مصروفات ثابتة (Fixed Costs)'),
+
+        -- Variable Costs
+        ('مستهلكات (جوانتي – سرنجات – شاش – كحول)', 'مصروفات متغيرة (Variable Costs)'),
+        ('مواد تجميل (فيلر – بوتوكس – ميزوثيرابي)', 'مصروفات متغيرة (Variable Costs)'),
+        ('كريمات أو منتجات تُستخدم أثناء الجلسات', 'مصروفات متغيرة (Variable Costs)'),
+
+        -- Marketing Costs
+        ('إعلانات ممولة', 'التسويق (Marketing Costs)'),
+        ('إدارة صفحات (Social Media Manager)', 'التسويق (Marketing Costs)'),
+        ('تعاون مع إنفلونسرز', 'التسويق (Marketing Costs)'),
+
+        -- Financial & Legal
+        ('ضرائب (مثل VAT 14%)', 'مصروفات مالية وقانونية'),
+        ('عمولات الدفع الإلكتروني (InstaPay – POS – فوري)', 'مصروفات مالية وقانونية'),
+        ('محاسب أو مستشار قانوني', 'مصروفات مالية وقانونية'),
+
+        -- Other Expenses
+        ('مصروفات أخرى (Other Expenses)', 'مصروفات أخرى (Other Expenses)')
+      ) AS s(name, categoryName)
+      ON c.name = s.categoryName
+      WHERE NOT EXISTS (
+        SELECT 1 FROM expense_subcategories es
+        WHERE es."categoryId" = c.id AND es.name = s.name
+      );
+
+      -- Backfill existing expenses with Other Expenses if missing
+      UPDATE "Expenses" e
+      SET "categoryId" = c.id,
+          "subcategoryId" = s.id
+      FROM expense_categories c
+      JOIN expense_subcategories s
+        ON s."categoryId" = c.id
+       AND s.name = 'مصروفات أخرى (Other Expenses)'
+      WHERE e."categoryId" IS NULL OR e."subcategoryId" IS NULL
+        AND c.name = 'مصروفات أخرى (Other Expenses)';
+    `;
+
+    await sequelize.query(seedSql);
+    console.log('✅ Expenses classification migration applied.');
+  } catch (err) {
+    console.warn('⚠️ Expenses classification migration skip:', err.message);
+  }
+};
+
 const connectDB = async () => {
   try {
     await sequelize.authenticate();
@@ -137,6 +235,7 @@ const connectDB = async () => {
     await runBookingAgeAndConsultationMigration();
     await runAppointmentDateNullableMigration();
     await runSlotBookingMigration();
+    await runExpensesClassificationMigration();
   } catch (error) {
     console.error('❌ Unable to connect to the database:', error);
     process.exit(1);

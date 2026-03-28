@@ -1,4 +1,4 @@
-const { Booking, IncomeEntry, Expense } = require('../models/index');
+const { Booking, IncomeEntry, Expense, ExpenseCategory, ExpenseSubcategory } = require('../models/index');
 const { Op } = require('sequelize');
 const sequelize = require('sequelize');
 
@@ -61,18 +61,22 @@ exports.getIncomeFromBookings = async (req, res, next) => {
         const list = await Booking.findAll({
             attributes: [
                 'customerName',
+                'visitType',
+                'procedureType',
                 [sequelize.fn('SUM', sequelize.cast(sequelize.col('amountPaid'), 'DECIMAL')), 'total']
             ],
             where: {
                 appointmentDate: { [Op.between]: [start, end] },
                 status: { [Op.notIn]: ['cancelled', 'rejected'] }
             },
-            group: ['customerName'],
+            group: ['customerName', 'visitType', 'procedureType'],
             raw: true
         });
 
         const rows = list.map(r => ({
             customerName: r.customerName,
+            visitType: r.visitType,
+            procedureType: r.procedureType,
             amount: parseFloat(r.total || 0)
         }));
 
@@ -150,7 +154,11 @@ exports.getExpenses = async (req, res, next) => {
             where: {
                 expenseDate: { [Op.between]: [start, end] }
             },
-            order: [['expenseDate', 'DESC'], ['id', 'DESC']]
+            order: [['expenseDate', 'DESC'], ['id', 'DESC']],
+            include: [
+                { model: ExpenseCategory, as: 'category', attributes: ['id', 'name'] },
+                { model: ExpenseSubcategory, as: 'subcategory', attributes: ['id', 'name', 'categoryId'] }
+            ]
         });
 
         const total = expenses.reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
@@ -168,10 +176,13 @@ exports.getExpenses = async (req, res, next) => {
 // POST /api/accounts/expenses — إضافة مصروف (اسم العملية + المبلغ)
 exports.addExpense = async (req, res, next) => {
     try {
-        const { description, amount, expenseDate, notes } = req.body;
+        const { description, amount, date, expenseDate, notes, category_id, subcategory_id } = req.body;
 
         if (!description || amount == null || amount === '') {
             return res.status(400).json({ message: 'description and amount are required.' });
+        }
+        if (category_id == null) {
+            return res.status(400).json({ message: 'category_id is required.' });
         }
 
         const numAmount = parseFloat(amount);
@@ -179,17 +190,179 @@ exports.addExpense = async (req, res, next) => {
             return res.status(400).json({ message: 'amount must be a positive number.' });
         }
 
+        const numCategoryId = parseInt(category_id, 10);
+        if (Number.isNaN(numCategoryId)) {
+            return res.status(400).json({ message: 'category_id must be a number.' });
+        }
+
+        const category = await ExpenseCategory.findByPk(numCategoryId);
+        if (!category) {
+            return res.status(400).json({ message: 'Invalid category_id.' });
+        }
+
+        let numSubcategoryId = null;
+        if (subcategory_id != null) {
+            numSubcategoryId = parseInt(subcategory_id, 10);
+            if (Number.isNaN(numSubcategoryId)) {
+                return res.status(400).json({ message: 'subcategory_id must be a number.' });
+            }
+            const subcategory = await ExpenseSubcategory.findOne({
+                where: { id: numSubcategoryId, categoryId: numCategoryId }
+            });
+            if (!subcategory) {
+                return res.status(400).json({ message: 'Invalid subcategory_id for the given category_id.' });
+            }
+        }
+
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        const expenseDateFinal = (date || expenseDate || new Date().toISOString().slice(0, 10));
+        if (!dateRegex.test(String(expenseDateFinal).slice(0, 10))) {
+            return res.status(400).json({ message: 'date must be in YYYY-MM-DD format.' });
+        }
+
         const expense = await Expense.create({
             description: String(description).trim(),
             amount: numAmount,
-            expenseDate: expenseDate || new Date().toISOString().slice(0, 10),
-            notes: notes || null
+            expenseDate: String(expenseDateFinal).slice(0, 10),
+            notes: notes || null,
+            categoryId: numCategoryId,
+            subcategoryId: numSubcategoryId
         });
 
         res.status(201).json({
             message: 'Expense added successfully.',
             expense
         });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// GET /api/accounts/expense-categories — list categories
+exports.getExpenseCategories = async (req, res, next) => {
+    try {
+        const categories = await ExpenseCategory.findAll({ order: [['id', 'ASC']] });
+        res.status(200).json({ categories });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// POST /api/accounts/expense-categories
+exports.addExpenseCategory = async (req, res, next) => {
+    try {
+        const { name } = req.body;
+        if (!name) return res.status(400).json({ message: 'name is required.' });
+        const category = await ExpenseCategory.create({ name: String(name).trim() });
+        res.status(201).json({ message: 'Category created successfully.', category });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// PUT /api/accounts/expense-categories/:id
+exports.updateExpenseCategory = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const { name } = req.body;
+        const category = await ExpenseCategory.findByPk(id);
+        if (!category) return res.status(404).json({ message: 'Category not found.' });
+        if (name) category.name = String(name).trim();
+        await category.save();
+        res.status(200).json({ message: 'Category updated successfully.', category });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// DELETE /api/accounts/expense-categories/:id
+exports.deleteExpenseCategory = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const category = await ExpenseCategory.findByPk(id);
+        if (!category) return res.status(404).json({ message: 'Category not found.' });
+        await category.destroy();
+        res.status(200).json({ message: 'Category deleted successfully.' });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// GET /api/accounts/expense-subcategories?category_id=...
+exports.getExpenseSubcategories = async (req, res, next) => {
+    try {
+        const { category_id } = req.query;
+        const where = {};
+        if (category_id != null) {
+            const num = parseInt(category_id, 10);
+            if (!Number.isNaN(num)) where.categoryId = num;
+        }
+        const subcategories = await ExpenseSubcategory.findAll({
+            where,
+            order: [['id', 'ASC']]
+        });
+        res.status(200).json({ subcategories });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// POST /api/accounts/expense-subcategories
+exports.addExpenseSubcategory = async (req, res, next) => {
+    try {
+        const { name, category_id } = req.body;
+        if (!name || category_id == null) {
+            return res.status(400).json({ message: 'name and category_id are required.' });
+        }
+        const numCategoryId = parseInt(category_id, 10);
+        if (Number.isNaN(numCategoryId)) {
+            return res.status(400).json({ message: 'category_id must be a number.' });
+        }
+        const category = await ExpenseCategory.findByPk(numCategoryId);
+        if (!category) return res.status(400).json({ message: 'Invalid category_id.' });
+
+        const subcategory = await ExpenseSubcategory.create({
+            name: String(name).trim(),
+            categoryId: numCategoryId
+        });
+        res.status(201).json({ message: 'Subcategory created successfully.', subcategory });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// PUT /api/accounts/expense-subcategories/:id
+exports.updateExpenseSubcategory = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const { name, category_id } = req.body;
+        const subcategory = await ExpenseSubcategory.findByPk(id);
+        if (!subcategory) return res.status(404).json({ message: 'Subcategory not found.' });
+
+        if (name) subcategory.name = String(name).trim();
+        if (category_id != null) {
+            const numCategoryId = parseInt(category_id, 10);
+            if (Number.isNaN(numCategoryId)) return res.status(400).json({ message: 'category_id must be a number.' });
+            const category = await ExpenseCategory.findByPk(numCategoryId);
+            if (!category) return res.status(400).json({ message: 'Invalid category_id.' });
+            subcategory.categoryId = numCategoryId;
+        }
+
+        await subcategory.save();
+        res.status(200).json({ message: 'Subcategory updated successfully.', subcategory });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// DELETE /api/accounts/expense-subcategories/:id
+exports.deleteExpenseSubcategory = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const subcategory = await ExpenseSubcategory.findByPk(id);
+        if (!subcategory) return res.status(404).json({ message: 'Subcategory not found.' });
+        await subcategory.destroy();
+        res.status(200).json({ message: 'Subcategory deleted successfully.' });
     } catch (error) {
         next(error);
     }

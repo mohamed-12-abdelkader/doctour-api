@@ -1,9 +1,27 @@
 const { Booking, PatientReport, ReportMedication } = require('../models/index');
 const { Op } = require('sequelize');
 const workingDayService = require('../services/workingDayService');
+const bookingSlotService = require('../services/bookingSlotService');
 const { notifyNewOnlineBooking, notifyBookingStatusChange } = require('../services/notificationService');
 const { emitBookingUpdateForDate } = require('../socket');
-const { parseTimeToMinutes, minutesToTimeStr } = require('../utils/slotHelper');
+const { parseTimeToMinutes, minutesToTimeStr, SLOT_DURATION_MINUTES, normalizeTimeSlot } = require('../utils/slotHelper');
+
+// قائمة أنواع الزيارة التفصيلية المتاحة لحجوزات العيادة
+const CLINIC_PROCEDURE_TYPES = [
+    'Botox',
+    'filler',
+    'تنعيم علاجي للشعر',
+    'Skin booster',
+    'جلسة أوكسجينو',
+    'تقشير بارد',
+    'تقشير كيميائي',
+    'ديرما بن بلازما أو ميزو',
+    'جلسة تساقط الشعر',
+    'إزالة الزوائد الجلدية',
+    'توريد علاجي للشفايف',
+    'تنضيف بشرة Basic',
+    'تنضيف بشرة عميق'
+];
 
 const reportWithMedicationsInclude = [
     {
@@ -20,6 +38,31 @@ function getBookingDateStr(booking) {
     if (booking.appointmentDate) {
         const d = new Date(booking.appointmentDate);
         return d.toISOString().slice(0, 10);
+    }
+    return null;
+}
+
+/**
+ * وقت الموعد الفعلي للعرض — من timeSlot أو من appointmentDate (ساعة:دقيقة بتوقيت السيرفر).
+ * @param {object} booking - حجز (model أو plain)
+ * @returns {string|null} مثل "13:10" أو "1:10" (12 ساعة) — null إن لم يوجد موعد
+ */
+function getBookingTimeStr(booking, use12h = true) {
+    if (booking.timeSlot && /^\d{1,2}:\d{2}$/.test(String(booking.timeSlot).trim())) {
+        const s = String(booking.timeSlot).trim();
+        if (!use12h) return s;
+        const [h, m] = s.split(':').map(Number);
+        if (h === 0) return `12:${String(m).padStart(2, '0')}`;
+        if (h < 12) return `${h}:${String(m).padStart(2, '0')}`;
+        return `${h === 12 ? 12 : h - 12}:${String(m).padStart(2, '0')}`;
+    }
+    if (booking.appointmentDate) {
+        const d = new Date(booking.appointmentDate);
+        const h = d.getHours(), m = d.getMinutes();
+        if (!use12h) return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+        if (h === 0) return `12:${String(m).padStart(2, '0')}`;
+        if (h < 12) return `${h}:${String(m).padStart(2, '0')}`;
+        return `${h === 12 ? 12 : h - 12}:${String(m).padStart(2, '0')}`;
     }
     return null;
 }
@@ -79,13 +122,14 @@ async function getExpectedExaminationTime(booking) {
 
 /**
  * حساب الطاقة الاستيعابية لليوم بناءً على ساعات العمل.
- * كل ساعة = حجز واحد. مثال: 10:00 → 14:00 = 4 حجوزات كحد أقصى.
+ * كل 10 دقائق = موعد واحد (نفس نظام السلاطات). مثال: 21:00 → 22:00 = 6 مواعيد.
  */
 function calculateCapacity(startTime, endTime) {
-    const [sh, sm] = startTime.split(':').map(Number);
-    const [eh, em] = endTime.split(':').map(Number);
-    const diffMinutes = (eh * 60 + em) - (sh * 60 + sm);
-    return Math.max(1, Math.floor(diffMinutes / 60));
+    const startMin = parseTimeToMinutes(startTime);
+    const endMin = parseTimeToMinutes(endTime);
+    if (Number.isNaN(startMin) || Number.isNaN(endMin) || startMin >= endMin) return 1;
+    const diffMinutes = endMin - startMin;
+    return Math.max(1, Math.floor(diffMinutes / SLOT_DURATION_MINUTES));
 }
 
 /**
@@ -203,15 +247,18 @@ exports.createBooking = async (req, res, next) => {
 // Protected: Create a clinic booking (Admin/Staff with manage_daily_bookings)
 exports.createClinicBooking = async (req, res, next) => {
     try {
-        const { name, phone, date, amountPaid, visitType } = req.body;
+        const { name, phone, date, time, amountPaid, visitType } = req.body;
 
         if (!name || !phone || !date) {
             return res.status(400).json({ message: 'Please provide name, phone, and appointment date.' });
         }
 
-        // Validate visitType if provided
-        if (visitType && !['checkup', 'followup', 'consultation'].includes(visitType)) {
-            return res.status(400).json({ message: 'Invalid visitType. Use checkup, followup, or consultation.' });
+        // Validate visitType (procedure name) if provided
+        if (visitType && !CLINIC_PROCEDURE_TYPES.includes(visitType)) {
+            return res.status(400).json({
+                message: 'Invalid visitType. Use one of predefined clinic procedures.',
+                allowedVisitTypes: CLINIC_PROCEDURE_TYPES
+            });
         }
 
         // توحيد التاريخ ليكون ضمن نفس اليوم عند الفلترة (YYYY-MM-DD → منتصف اليوم UTC)
@@ -240,9 +287,20 @@ exports.createClinicBooking = async (req, res, next) => {
             });
         }
 
-        const appointmentDate = /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
-            ? new Date(dateStr + 'T12:00:00.000Z')
-            : new Date(date);
+        let appointmentDate;
+        if (time && /^\d{1,2}:\d{2}$/.test(String(time).trim())) {
+            const [h, m] = String(time).trim().split(':').map(Number);
+            if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+                const timePart = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
+                appointmentDate = new Date(dateStr + 'T' + timePart);
+            } else {
+                appointmentDate = new Date(dateStr + 'T12:00:00.000Z');
+            }
+        } else if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+            appointmentDate = new Date(dateStr + 'T12:00:00.000Z');
+        } else {
+            appointmentDate = new Date(date);
+        }
 
         const booking = await Booking.create({
             customerName: name,
@@ -250,7 +308,10 @@ exports.createClinicBooking = async (req, res, next) => {
             appointmentDate,
             bookingType: 'clinic',
             amountPaid: amountPaid || 0,
-            visitType: visitType || 'checkup',
+            // visitType enum يبقى عاماً (كشف مثلاً) للحفاظ على السكيمة القديمة
+            visitType: 'checkup',
+            // الإسم التفصيلي للزيارة (من القائمة)
+            procedureType: visitType || null,
             status: 'confirmed' // Clinic bookings are confirmed by default
         });
 
@@ -324,11 +385,18 @@ exports.getAllBookings = async (req, res, next) => {
         }
 
         // ── فلتر visitType ──────────────────────────────────────────────
+        const allowedLegacyVisit = ['checkup', 'followup', 'consultation'];
         if (visitType) {
-            if (!['checkup', 'followup', 'consultation'].includes(visitType)) {
-                return res.status(400).json({ message: 'Invalid visitType. Use checkup, followup, or consultation.' });
+            if (allowedLegacyVisit.includes(visitType)) {
+                whereClause.visitType = visitType;
+            } else if (CLINIC_PROCEDURE_TYPES.includes(visitType)) {
+                whereClause.procedureType = visitType;
+            } else {
+                return res.status(400).json({
+                    message: 'Invalid visitType. Use checkup, followup, consultation, or one of predefined clinic procedures.',
+                    allowedVisitTypes: [...allowedLegacyVisit, ...CLINIC_PROCEDURE_TYPES]
+                });
             }
-            whereClause.visitType = visitType;
         }
 
         // ── تطبيق فلتر التاريخ ──────────────────────────────────────────
@@ -372,7 +440,16 @@ exports.getAllBookings = async (req, res, next) => {
             order: [['appointmentDate', 'ASC'], ['id', 'ASC']]
         });
 
-        res.status(200).json({ total: bookings.length, bookings });
+        const list = bookings.map(b => {
+            const plain = b.get ? b.get({ plain: true }) : b;
+            return {
+                ...plain,
+                appointmentTime: getBookingTimeStr(b, true),
+                appointmentTime24: getBookingTimeStr(b, false)
+            };
+        });
+
+        res.status(200).json({ total: list.length, bookings: list });
     } catch (error) {
         next(error);
     }
@@ -393,13 +470,50 @@ exports.updateBookingStatus = async (req, res, next) => {
             return res.status(404).json({ message: 'Booking not found.' });
         }
 
-        // عند تأكيد حجز أونلاين → نحدد appointmentDate من preferredDate أو من body.date
-        const confirmDate = status === 'confirmed' && booking.bookingType === 'online' && (req.body.date || booking.preferredDate);
-        if (confirmDate) {
-            const dateStr = String(req.body.date || booking.preferredDate).trim().slice(0, 10);
-            if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-                booking.appointmentDate = new Date(dateStr + 'T12:00:00.000Z');
+        // تأكيد حجز أونلاين: إلزامي تحديد تاريخ + وقت من المواعيد المتاحة فقط (مثل حجز العيادة)
+        if (status === 'confirmed' && booking.bookingType === 'online') {
+            const dateInput = req.body.date;
+            const timeRaw = req.body.time ?? req.body.timeSlot;
+            if (!dateInput || timeRaw == null || String(timeRaw).trim() === '') {
+                return res.status(400).json({
+                    message:
+                        'يجب تحديد تاريخ ووقت الموعد عند تأكيد حجز أونلاين. استخدم GET /api/bookings/available-slots?date=YYYY-MM-DD لمعرفة المواعيد المتاحة ثم أرسل date و time (HH:mm).',
+                    required: ['date', 'time'],
+                    hint: 'GET /api/bookings/available-slots?date=YYYY-MM-DD'
+                });
             }
+            const dateStr = String(dateInput).trim().slice(0, 10);
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+                return res.status(400).json({ message: 'Invalid date format. Use YYYY-MM-DD.' });
+            }
+            const normalizedTime = normalizeTimeSlot(String(timeRaw));
+            if (!normalizedTime) {
+                return res.status(400).json({ message: 'Invalid time format. Use HH:mm (e.g. 13:10).' });
+            }
+
+            const slotsResult = await bookingSlotService.getAvailableSlots(dateStr, { excludeBookingId: booking.id });
+            if (!slotsResult.available) {
+                return res.status(400).json({
+                    message:
+                        'لا يوجد مواعيد عمل متاحة لهذا اليوم — لا يمكن تأكيد الحجز الأونلاين. / ' + (slotsResult.message || ''),
+                    messageEn: slotsResult.message || 'No available working slots for this date.',
+                    details: { date: dateStr }
+                });
+            }
+            if (!slotsResult.availableSlots.includes(normalizedTime)) {
+                return res.status(400).json({
+                    message:
+                        'الموعد المحدد غير متاح. اختر يوماً ووقتاً من قائمة المواعيد المتاحة فقط لهذا اليوم.',
+                    date: dateStr,
+                    requestedTime: normalizedTime,
+                    available_slots: slotsResult.availableSlots
+                });
+            }
+
+            const [h, m] = normalizedTime.split(':').map(Number);
+            booking.appointmentDate = new Date(
+                `${dateStr}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`
+            );
         }
 
         booking.status = status;
@@ -440,16 +554,28 @@ exports.updateBooking = async (req, res, next) => {
             return res.status(404).json({ message: 'Booking not found.' });
         }
 
-        // Validate visitType if provided
-        if (visitType && !['checkup', 'followup', 'consultation'].includes(visitType)) {
-            return res.status(400).json({ message: 'Invalid visitType. Use checkup, followup, or consultation.' });
+        // Validate visitType if provided (قيم قديمة أو أنواع الإجراءات)
+        const allowedLegacy = ['checkup', 'followup', 'consultation'];
+        if (visitType && !allowedLegacy.includes(visitType) && !CLINIC_PROCEDURE_TYPES.includes(visitType)) {
+            return res.status(400).json({
+                message: 'Invalid visitType. Use checkup, followup, consultation, or one of predefined clinic procedures.',
+                allowedVisitTypes: [...allowedLegacy, ...CLINIC_PROCEDURE_TYPES]
+            });
         }
 
         // Update fields if provided
         if (name) booking.customerName = name;
         if (phone) booking.customerPhone = phone;
         if (amountPaid !== undefined) booking.amountPaid = amountPaid;
-        if (visitType) booking.visitType = visitType;
+        if (visitType) {
+            if (CLINIC_PROCEDURE_TYPES.includes(visitType)) {
+                booking.visitType = 'checkup';
+                booking.procedureType = visitType;
+            } else {
+                booking.visitType = visitType;
+                booking.procedureType = null;
+            }
+        }
         if (req.body.age !== undefined) booking.age = req.body.age;
 
         // لو بيتحدد/بيتغير التاريخ → نتحقق من يوم العمل والطاقة الاستيعابية

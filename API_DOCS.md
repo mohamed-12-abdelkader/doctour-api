@@ -264,9 +264,13 @@ Confirm, cancel, or reject a booking.
 - **Access**: Protected (Requires `manage_online_bookings` permission)
 - **Headers**: `Authorization: Bearer <token>`
 - **Body**:
+  - For **`confirmed`**: you **must** send `date` (`YYYY-MM-DD`) and `time` or `timeSlot` (`HH:mm`) chosen from `GET /api/bookings/available-slots?date=...` → `available_slots`. If the day has no working hours or no free slots, the API returns **400** with an Arabic error message.
+  - For `cancelled`, `rejected`, `pending`: only `status` is required.
   ```json
   {
-    "status": "confirmed"
+    "status": "confirmed",
+    "date": "2026-03-12",
+    "time": "13:10"
   }
   ```
   Options: `confirmed`, `cancelled`, `rejected`, `pending`
@@ -458,12 +462,25 @@ Cancel a booking (sets status to cancelled).
   {
     "description": "اسم العملية أو وصف المصروف",
     "amount": 200,
-    "expenseDate": "2026-01-31",
+    "date": "2026-01-31",
+    "category_id": 1,
+    "subcategory_id": 10,
     "notes": "ملاحظة اختيارية"
   }
   ```
-  `expenseDate` و `notes` اختياريان.
+  `date` و `notes` اختياريان، و`category_id` و`subcategory_id` مطلوبان في النظام الجديد.
 - **Response (201 Created)**: `{ "message": "Expense added successfully.", "expense": { ... } }`
+
+### تصنيفات المصروفات (Categories & Subcategories)
+- **GET** ` /api/accounts/expense-categories` (list)
+- **POST** `/api/accounts/expense-categories` (create)
+- **PUT** `/api/accounts/expense-categories/:id` (update)
+- **DELETE** `/api/accounts/expense-categories/:id` (delete)
+
+- **GET** `/api/accounts/expense-subcategories?category_id=...` (list)
+- **POST** `/api/accounts/expense-subcategories` (create)
+- **PUT** `/api/accounts/expense-subcategories/:id` (update)
+- **DELETE** `/api/accounts/expense-subcategories/:id` (delete)
 
 ### 5. قائمة المصروفات لشهر
 - **Endpoint**: `GET /api/accounts/expenses?month=YYYY-MM`

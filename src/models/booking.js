@@ -40,6 +40,12 @@ const Booking = sequelize.define('Booking', {
         defaultValue: 'checkup',
         allowNull: false
     },
+    // نوع الزيارة التفصيلي (Botox, filler, تنضيف بشرة عميق، ...)
+    procedureType: {
+        type: DataTypes.STRING(191),
+        allowNull: true,
+        comment: 'نوع الزيارة التفصيلي الذي يراه المستخدم'
+    },
     status: {
         type: DataTypes.ENUM('pending', 'confirmed', 'cancelled', 'rejected'),
         defaultValue: 'pending'

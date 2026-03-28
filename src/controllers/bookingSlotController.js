@@ -13,13 +13,25 @@ exports.getAvailableSlots = async (req, res, next) => {
         }
         const dateStr = String(req.query.date).trim();
         const result = await bookingSlotService.getAvailableSlots(dateStr);
+
         if (result.available === false) {
             return res.status(400).json({
                 available: false,
                 message: result.message
             });
         }
-        res.status(200).json(result);
+
+        // API contract: return only non-booked slots for the day,
+        // sorted ascending by time.
+        // Example:
+        // {
+        //   "date": "2026-03-12",
+        //   "available_slots": ["10:00", "10:10", "10:20"]
+        // }
+        res.status(200).json({
+            date: result.date,
+            available_slots: result.availableSlots
+        });
     } catch (err) {
         next(err);
     }

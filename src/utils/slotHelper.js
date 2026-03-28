@@ -1,9 +1,12 @@
 /**
- * Time slot helpers: parse "HH:mm", generate slots between start and end (1-hour each),
+ * Time slot helpers: parse "HH:mm", generate slots between start and end,
  * and check if a slot is in the past.
+ * 
+ * Slot duration is configured in minutes. Currently: 10 minutes
+ * → 6 slots لكل ساعة (00، 10، 20، 30، 40، 50).
  */
 
-const SLOT_DURATION_MINUTES = 60;
+const SLOT_DURATION_MINUTES = 10;
 
 /**
  * Parse "HH:mm" to minutes since midnight.
@@ -32,10 +35,10 @@ function minutesToTimeStr(minutes) {
 }
 
 /**
- * Generate 1-hour slots between startTime and endTime (end exclusive).
+ * Generate slots between startTime and endTime (end exclusive).
  * @param {string} startTime - e.g. "10:00"
  * @param {string} endTime - e.g. "18:00"
- * @returns {string[]} e.g. ["10:00", "11:00", ..., "17:00"]
+ * @returns {string[]} e.g. ["10:00", "10:10", "10:20", ...]
  */
 function generateSlots(startTime, endTime) {
     const startMin = parseTimeToMinutes(startTime);
@@ -79,11 +82,41 @@ function filterOutPastSlots(dateStr, slots, now = new Date()) {
     return slots.filter(slot => !isSlotInPast(dateStr, slot, now));
 }
 
+/**
+ * Get the 10-minute slot (HH:mm) that a given Date falls into (round down).
+ * Used to treat appointmentDate-based bookings as occupying a slot.
+ * @param {Date} date - appointment date/time
+ * @returns {string} e.g. "13:00" or "13:10"
+ */
+function dateToSlotString(date) {
+    if (!date || !(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+    const totalMinutes = date.getHours() * 60 + date.getMinutes();
+    const slotMinutes = Math.floor(totalMinutes / SLOT_DURATION_MINUTES) * SLOT_DURATION_MINUTES;
+    return minutesToTimeStr(slotMinutes);
+}
+
+/**
+ * Normalize user input to "HH:mm" (24h) for comparison with available_slots.
+ * @param {string} str - e.g. "9:05" or "09:05"
+ * @returns {string|null}
+ */
+function normalizeTimeSlot(str) {
+    if (!str || typeof str !== 'string') return null;
+    const parts = String(str).trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!parts) return null;
+    const h = parseInt(parts[1], 10);
+    const m = parseInt(parts[2], 10);
+    if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 module.exports = {
     parseTimeToMinutes,
     minutesToTimeStr,
     generateSlots,
     isSlotInPast,
     filterOutPastSlots,
+    dateToSlotString,
+    normalizeTimeSlot,
     SLOT_DURATION_MINUTES
 };
