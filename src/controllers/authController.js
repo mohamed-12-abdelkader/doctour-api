@@ -1,4 +1,4 @@
-const { User, Permission } = require('../models/index');
+const { User, Permission, DoctorProfile } = require('../models/index');
 const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_key_123';
@@ -19,12 +19,19 @@ exports.login = async (req, res, next) => {
 
         const user = await User.findOne({
             where: { email },
-            include: {
-                model: Permission,
-                as: 'permissions',
-                attributes: ['name'],
-                through: { attributes: [] }
-            }
+            include: [
+                {
+                    model: Permission,
+                    as: 'permissions',
+                    attributes: ['name'],
+                    through: { attributes: [] }
+                },
+                {
+                    model: DoctorProfile,
+                    as: 'doctorProfile',
+                    attributes: ['id', 'specialty', 'phone', 'imageUrl', 'isActive']
+                }
+            ]
         });
 
         if (!user || !(await user.comparePassword(password))) {
@@ -40,6 +47,7 @@ exports.login = async (req, res, next) => {
             name: user.name,
             email: user.email,
             role: user.role,
+            doctorProfile: user.doctorProfile || null,
             permissions: user.permissions ? user.permissions.map(p => p.name) : [],
             token: generateToken(user.id),
         });

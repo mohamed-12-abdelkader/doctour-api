@@ -2,10 +2,17 @@ const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const cloudinary = require('../config/cloudinary');
 
+/** حجم أقصى للملف (MB) — يُضبط من .env: MAX_PRESCRIPTION_FILE_MB (افتراضي 25) */
+const MAX_FILE_MB = Math.min(
+    100,
+    Math.max(1, parseInt(process.env.MAX_PRESCRIPTION_FILE_MB || '25', 10) || 25)
+);
+const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
+
 /**
  * Multer storage → رفع مباشر على Cloudinary في مجلد prescriptions/
  * يقبل: JPEG, PNG, WEBP, PDF
- * الحجم الأقصى: 5MB
+ * الحجم الأقصى: انظر MAX_FILE_MB / MAX_PRESCRIPTION_FILE_MB
  */
 const storage = new CloudinaryStorage({
     cloudinary,
@@ -29,7 +36,8 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({
     storage,
     fileFilter,
-    limits: { fileSize: 5 * 1024 * 1024 }  // 5MB
+    limits: { fileSize: MAX_FILE_BYTES }
 });
 
 module.exports = upload;
+module.exports.MAX_PRESCRIPTION_FILE_MB = MAX_FILE_MB;

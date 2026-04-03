@@ -124,6 +124,50 @@ const runSlotBookingMigration = async () => {
   }
 };
 
+const runMultiDoctorMigration = async () => {
+  try {
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS "DoctorProfiles" (
+        id SERIAL PRIMARY KEY,
+        "userId" INTEGER NOT NULL UNIQUE REFERENCES "Users"(id) ON DELETE CASCADE,
+        specialty VARCHAR(191) NOT NULL,
+        phone VARCHAR(30) NOT NULL,
+        "imageUrl" VARCHAR(512),
+        "isActive" BOOLEAN NOT NULL DEFAULT TRUE,
+        "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+        "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    const userRoleValues = ['doctor', 'secretary'];
+    for (const roleValue of userRoleValues) {
+      await sequelize.query(`
+        DO $$ BEGIN
+          ALTER TYPE "enum_Users_role" ADD VALUE '${roleValue}';
+        EXCEPTION
+          WHEN duplicate_object THEN null;
+          WHEN undefined_object THEN null;
+        END $$;
+      `);
+    }
+
+    await sequelize.query(`ALTER TABLE "WorkingDays" ADD COLUMN IF NOT EXISTS "doctorId" INTEGER;`);
+    await sequelize.query(`ALTER TABLE "WorkingDays" DROP CONSTRAINT IF EXISTS "WorkingDays_date_key";`).catch(() => {});
+    await sequelize.query(`DROP INDEX IF EXISTS "WorkingDays_date";`).catch(() => {});
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS "working_days_doctor_date_idx" ON "WorkingDays" ("doctorId", "date");`);
+    await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS "working_days_doctor_date_unique_idx" ON "WorkingDays" ("doctorId", "date");`);
+
+    await sequelize.query(`ALTER TABLE "Bookings" ADD COLUMN IF NOT EXISTS "doctorId" INTEGER REFERENCES "DoctorProfiles"(id) ON DELETE SET NULL;`);
+    await sequelize.query(`ALTER TABLE "Bookings" ADD COLUMN IF NOT EXISTS "assignedBy" INTEGER REFERENCES "Users"(id) ON DELETE SET NULL;`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS "bookings_doctor_date_idx" ON "Bookings" ("doctorId", "slotDate");`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS "bookings_doctor_appointment_idx" ON "Bookings" ("doctorId", "appointmentDate");`);
+
+    console.log('✅ Multi-doctor migration applied.');
+  } catch (err) {
+    console.warn('⚠️ Multi-doctor migration skip:', err.message);
+  }
+};
+
 // Migration: Expenses classification (categories + subcategories) tables + columns
 const runExpensesClassificationMigration = async () => {
   try {
@@ -235,6 +279,7 @@ const connectDB = async () => {
     await runBookingAgeAndConsultationMigration();
     await runAppointmentDateNullableMigration();
     await runSlotBookingMigration();
+    await runMultiDoctorMigration();
     await runExpensesClassificationMigration();
   } catch (error) {
     console.error('❌ Unable to connect to the database:', error);

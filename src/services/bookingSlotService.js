@@ -19,8 +19,12 @@ const SLOT_HOLDING_STATUSES = ['pending', 'confirmed'];
  */
 async function getAvailableSlots(dateStr, options = {}) {
     const excludeBookingId = options.excludeBookingId || null;
+    const doctorId = options.doctorId || null;
+    if (!doctorId) {
+        return { available: false, message: 'doctorId is required' };
+    }
     const wd = await WorkingDay.findOne({
-        where: { date: dateStr, isActive: true }
+        where: { date: dateStr, doctorId, isActive: true }
     });
     if (!wd) {
         return { available: false, message: messages.BOOKING_NOT_AVAILABLE_TODAY };
@@ -38,8 +42,8 @@ async function getAvailableSlots(dateStr, options = {}) {
     }
 
     const [countsSlot, countsAppointment] = await Promise.all([
-        getBookingCountsBySlot(dateStr, futureSlots, excludeBookingId),
-        getAppointmentDateCountsBySlot(dateStr, futureSlots, excludeBookingId)
+        getBookingCountsBySlot(dateStr, futureSlots, doctorId, excludeBookingId),
+        getAppointmentDateCountsBySlot(dateStr, futureSlots, doctorId, excludeBookingId)
     ]);
     const counts = mergeSlotCounts(countsSlot, countsAppointment);
     const slots = futureSlots.map(timeSlot => ({
@@ -66,13 +70,13 @@ async function getAvailableSlots(dateStr, options = {}) {
  * Count slot-based bookings per timeSlot (slotDate + timeSlot).
  * Only pending/confirmed hold the slot; cancelled and rejected do not.
  */
-async function getBookingCountsBySlot(dateStr, timeSlots, excludeBookingId = null) {
+async function getBookingCountsBySlot(dateStr, timeSlots, doctorId, excludeBookingId = null) {
     if (!timeSlots || timeSlots.length === 0) return {};
     let sql = `SELECT "timeSlot", COUNT(*)::int AS count
          FROM "Bookings"
-         WHERE "slotDate" = :date AND "timeSlot" IN (:slots)
+         WHERE "slotDate" = :date AND "timeSlot" IN (:slots) AND "doctorId" = :doctorId
            AND "status" IN (:statuses)`;
-    const replacements = { date: dateStr, slots: timeSlots, statuses: SLOT_HOLDING_STATUSES };
+    const replacements = { date: dateStr, slots: timeSlots, statuses: SLOT_HOLDING_STATUSES, doctorId };
     if (excludeBookingId) {
         sql += ` AND "id" != :excludeId`;
         replacements.excludeId = excludeBookingId;
@@ -91,13 +95,14 @@ async function getBookingCountsBySlot(dateStr, timeSlots, excludeBookingId = nul
  * Count bookings that use appointmentDate on the given date (clinic/online).
  * Converts appointmentDate to 10-min slot and adds to counts so those slots are excluded from available.
  */
-async function getAppointmentDateCountsBySlot(dateStr, timeSlots, excludeBookingId = null) {
+async function getAppointmentDateCountsBySlot(dateStr, timeSlots, doctorId, excludeBookingId = null) {
     if (!timeSlots || timeSlots.length === 0) return {};
     const slotSet = new Set(timeSlots);
     const startOfDay = new Date(dateStr + 'T00:00:00.000Z');
     const endOfDay = new Date(dateStr + 'T23:59:59.999Z');
     const where = {
         appointmentDate: { [Op.gte]: startOfDay, [Op.lte]: endOfDay },
+        doctorId,
         status: { [Op.in]: SLOT_HOLDING_STATUSES }
     };
     if (excludeBookingId) {
@@ -137,9 +142,9 @@ function mergeSlotCounts(countsSlot, countsAppointment) {
  * - No duplicate: same patient doesn't have another non-cancelled booking for same date+slot
  * Returns { success, booking?, message? } with Arabic message on failure.
  */
-async function createSlotBooking(patientId, dateStr, timeSlot, bookingType) {
+async function createSlotBooking(patientId, dateStr, timeSlot, bookingType, doctorId) {
     const wd = await WorkingDay.findOne({
-        where: { date: dateStr, isActive: true }
+        where: { date: dateStr, doctorId, isActive: true }
     });
     if (!wd) {
         return { success: false, message: messages.BOOKING_NOT_AVAILABLE_TODAY };
@@ -155,7 +160,7 @@ async function createSlotBooking(patientId, dateStr, timeSlot, bookingType) {
         return { success: false, message: messages.BOOKING_SLOTS_ENDED };
     }
 
-    const counts = await getBookingCountsBySlot(dateStr, [timeSlot]);
+    const counts = await getBookingCountsBySlot(dateStr, [timeSlot], doctorId);
     if ((counts[timeSlot] || 0) >= MAX_PER_SLOT) {
         return { success: false, message: messages.SLOT_FULL };
     }
@@ -179,6 +184,7 @@ async function createSlotBooking(patientId, dateStr, timeSlot, bookingType) {
 
     const booking = await Booking.create({
         patientId,
+        doctorId,
         customerName: patient.name,
         customerPhone: patient.phone,
         slotDate: dateStr,

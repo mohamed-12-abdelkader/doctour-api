@@ -5,6 +5,7 @@ const Permission = require('./permission');
 const Booking = require('./booking');
 const Patient = require('./Patient');
 const WorkingDay = require('./WorkingDay');
+const DoctorProfile = require('./DoctorProfile');
 const PatientReport = require('./patientReport');
 const ReportMedication = require('./reportMedication');
 const IncomeEntry = require('./incomeEntry');
@@ -38,9 +39,16 @@ Permission.belongsToMany(User, { through: UserPermission, foreignKey: 'permissio
 
 WorkingDay.belongsTo(User, { foreignKey: 'createdBy' });
 User.hasMany(WorkingDay, { foreignKey: 'createdBy' });
+DoctorProfile.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasOne(DoctorProfile, { foreignKey: 'userId', as: 'doctorProfile' });
+
+WorkingDay.belongsTo(DoctorProfile, { foreignKey: 'doctorId', as: 'doctor' });
+DoctorProfile.hasMany(WorkingDay, { foreignKey: 'doctorId', as: 'workingDays' });
 
 Patient.hasMany(Booking, { foreignKey: 'patientId' });
 Booking.belongsTo(Patient, { foreignKey: 'patientId' });
+Booking.belongsTo(DoctorProfile, { foreignKey: 'doctorId', as: 'doctor' });
+DoctorProfile.hasMany(Booking, { foreignKey: 'doctorId', as: 'bookings' });
 
 Booking.hasMany(PatientReport, { foreignKey: 'bookingId', as: 'reports' });
 PatientReport.belongsTo(Booking, { foreignKey: 'bookingId' });
@@ -61,6 +69,7 @@ module.exports = {
     Booking,
     Patient,
     WorkingDay,
+    DoctorProfile,
     PatientReport,
     ReportMedication,
     IncomeEntry,

@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { User, Permission } = require('../models/index');
+const { User, Permission, DoctorProfile } = require('../models/index');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_key_123';
 
@@ -19,12 +19,19 @@ exports.protect = async (req, res, next) => {
 
         // Find user and include permissions
         const user = await User.findByPk(decoded.id, {
-            include: {
-                model: Permission,
-                as: 'permissions',
-                attributes: ['name'],
-                through: { attributes: [] }
-            }
+            include: [
+                {
+                    model: Permission,
+                    as: 'permissions',
+                    attributes: ['name'],
+                    through: { attributes: [] }
+                },
+                {
+                    model: DoctorProfile,
+                    as: 'doctorProfile',
+                    attributes: ['id', 'specialty', 'phone', 'imageUrl', 'isActive']
+                }
+            ]
         });
 
         if (!user) {

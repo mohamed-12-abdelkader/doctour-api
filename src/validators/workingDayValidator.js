@@ -17,7 +17,10 @@ function parseTime(s) {
 }
 
 function validateSetWorkingHours(body) {
-    const { date, startTime, endTime } = body || {};
+    const { date, startTime, endTime, doctorId } = body || {};
+    if (doctorId == null || !/^\d+$/.test(String(doctorId))) {
+        return { error: 'doctorId مطلوب' };
+    }
     if (!date || !DATE_REGEX.test(String(date).trim())) {
         return { error: 'التاريخ مطلوب بصيغة YYYY-MM-DD' };
     }
@@ -39,7 +42,7 @@ function validateSetWorkingHours(body) {
 }
 
 function validateUpdateWorkingHours(body) {
-    const allowed = ['date', 'startTime', 'endTime', 'isActive'];
+    const allowed = ['date', 'startTime', 'endTime', 'isActive', 'doctorId'];
     const keys = Object.keys(body || {});
     const invalid = keys.filter(k => !allowed.includes(k));
     if (invalid.length) {
@@ -53,6 +56,9 @@ function validateUpdateWorkingHours(body) {
     }
     if (body.date != null && !DATE_REGEX.test(String(body.date).trim())) {
         return { error: 'التاريخ بصيغة YYYY-MM-DD' };
+    }
+    if (body.doctorId != null && !/^\d+$/.test(String(body.doctorId))) {
+        return { error: 'doctorId غير صحيح' };
     }
     return null;
 }

@@ -3,11 +3,13 @@ const { Op } = require('sequelize');
 const workingDayService = require('../services/workingDayService');
 const bookingSlotService = require('../services/bookingSlotService');
 const { notifyNewOnlineBooking, notifyBookingStatusChange } = require('../services/notificationService');
-const { emitBookingUpdateForDate } = require('../socket');
+const { emitBookingListChange } = require('../socket');
 const { parseTimeToMinutes, minutesToTimeStr, SLOT_DURATION_MINUTES, normalizeTimeSlot } = require('../utils/slotHelper');
 
 // قائمة أنواع الزيارة التفصيلية المتاحة لحجوزات العيادة
 const CLINIC_PROCEDURE_TYPES = [
+    'كشف',
+    'إعادة',
     'Botox',
     'filler',
     'تنعيم علاجي للشعر',
@@ -76,7 +78,8 @@ async function getExpectedExaminationTime(booking) {
     const dateStr = getBookingDateStr(booking);
     if (!dateStr) return null;
 
-    const workingDay = await workingDayService.getWorkingDayByDate(dateStr);
+    if (!booking.doctorId) return null;
+    const workingDay = await workingDayService.getWorkingDayByDate(dateStr, booking.doctorId);
     if (!workingDay) return null;
 
     const startMin = parseTimeToMinutes(workingDay.startTime);
@@ -88,6 +91,7 @@ async function getExpectedExaminationTime(booking) {
 
     const sameDayBookings = await Booking.findAll({
         where: {
+            doctorId: booking.doctorId,
             status: 'confirmed',
             [Op.or]: [
                 { appointmentDate: { [Op.between]: [startOfDay, endOfDay] } },
@@ -138,11 +142,12 @@ function calculateCapacity(startTime, endTime) {
  * @param {string} dateStr - YYYY-MM-DD
  * @param {number|null} excludeId - حجز يتم تعديله (لا يُحسب في العداد)
  */
-async function getActiveBookingsCount(dateStr, excludeId = null) {
+async function getActiveBookingsCount(dateStr, doctorId, excludeId = null) {
     const startOfDay = new Date(dateStr + 'T00:00:00.000Z');
     const endOfDay = new Date(dateStr + 'T23:59:59.999Z');
     const where = {
         bookingType: 'clinic',
+        doctorId,
         appointmentDate: { [Op.between]: [startOfDay, endOfDay] },
         status: { [Op.notIn]: ['cancelled', 'rejected'] }
     };
@@ -247,10 +252,10 @@ exports.createBooking = async (req, res, next) => {
 // Protected: Create a clinic booking (Admin/Staff with manage_daily_bookings)
 exports.createClinicBooking = async (req, res, next) => {
     try {
-        const { name, phone, date, time, amountPaid, visitType } = req.body;
+        const { name, phone, date, time, amountPaid, visitType, doctorId } = req.body;
 
-        if (!name || !phone || !date) {
-            return res.status(400).json({ message: 'Please provide name, phone, and appointment date.' });
+        if (!name || !phone || !date || !doctorId) {
+            return res.status(400).json({ message: 'Please provide name, phone, appointment date, and doctorId.' });
         }
 
         // Validate visitType (procedure name) if provided
@@ -265,7 +270,7 @@ exports.createClinicBooking = async (req, res, next) => {
         const dateStr = String(date).trim().slice(0, 10);
 
         // ❌ منع إنشاء حجز لو الأدمن مش محدد يوم عمل لهذا التاريخ
-        const workingDay = await workingDayService.getWorkingDayByDate(dateStr);
+        const workingDay = await workingDayService.getWorkingDayByDate(dateStr, Number(doctorId));
         if (!workingDay) {
             return res.status(400).json({
                 message: `لا يمكن إنشاء حجز في ${dateStr} — لم يتم تحديد يوم عمل نشط لهذا التاريخ. / No active working day is set for ${dateStr}. Please configure working hours first.`
@@ -274,7 +279,7 @@ exports.createClinicBooking = async (req, res, next) => {
 
         // ❌ منع إنشاء حجز لو الطاقة الاستيعابية امتلأت
         const capacity = calculateCapacity(workingDay.startTime, workingDay.endTime);
-        const currentCount = await getActiveBookingsCount(dateStr);
+        const currentCount = await getActiveBookingsCount(dateStr, Number(doctorId));
         if (currentCount >= capacity) {
             return res.status(409).json({
                 message: `الوقت انتهى — لا يمكن إضافة حجوزات جديدة في ${dateStr}. / Booking slots are full for ${dateStr}.`,
@@ -302,18 +307,24 @@ exports.createClinicBooking = async (req, res, next) => {
             appointmentDate = new Date(date);
         }
 
+        const legacyVisitEnum = visitType === 'إعادة'
+            ? 'followup'
+            : 'checkup';
+
         const booking = await Booking.create({
             customerName: name,
             customerPhone: phone,
+            doctorId: Number(doctorId),
+            assignedBy: req.user.id,
             appointmentDate,
             bookingType: 'clinic',
             amountPaid: amountPaid || 0,
-            // visitType enum يبقى عاماً (كشف مثلاً) للحفاظ على السكيمة القديمة
-            visitType: 'checkup',
-            // الإسم التفصيلي للزيارة (من القائمة)
+            visitType: legacyVisitEnum,
             procedureType: visitType || null,
             status: 'confirmed' // Clinic bookings are confirmed by default
         });
+
+        emitBookingListChange(booking, 'created');
 
         res.status(201).json({
             message: 'Clinic booking created successfully.',
@@ -361,8 +372,15 @@ exports.getOnlineBookings = async (req, res, next) => {
 // Supports: ?date=YYYY-MM-DD | ?startDate=...&endDate=... | or combined
 exports.getAllBookings = async (req, res, next) => {
     try {
-        const { type, status, date, startDate, endDate, visitType } = req.query;
+        const { type, status, date, startDate, endDate, visitType, doctorId } = req.query;
         const whereClause = {};
+        if (req.user.role === 'doctor') {
+            const myDoctorId = req.user.doctorProfile && req.user.doctorProfile.id;
+            if (!myDoctorId) return res.status(403).json({ message: 'Doctor profile not found for this account.' });
+            whereClause.doctorId = myDoctorId;
+        } else if (doctorId) {
+            whereClause.doctorId = Number(doctorId);
+        }
 
         // ── نوع الحجز ───────────────────────────────────────────────────
         if (type) {
@@ -482,6 +500,10 @@ exports.updateBookingStatus = async (req, res, next) => {
                     hint: 'GET /api/bookings/available-slots?date=YYYY-MM-DD'
                 });
             }
+            const doctorId = Number(req.body.doctorId || booking.doctorId);
+            if (!doctorId) {
+                return res.status(400).json({ message: 'doctorId is required to confirm online booking.' });
+            }
             const dateStr = String(dateInput).trim().slice(0, 10);
             if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
                 return res.status(400).json({ message: 'Invalid date format. Use YYYY-MM-DD.' });
@@ -491,7 +513,7 @@ exports.updateBookingStatus = async (req, res, next) => {
                 return res.status(400).json({ message: 'Invalid time format. Use HH:mm (e.g. 13:10).' });
             }
 
-            const slotsResult = await bookingSlotService.getAvailableSlots(dateStr, { excludeBookingId: booking.id });
+            const slotsResult = await bookingSlotService.getAvailableSlots(dateStr, { excludeBookingId: booking.id, doctorId });
             if (!slotsResult.available) {
                 return res.status(400).json({
                     message:
@@ -514,10 +536,14 @@ exports.updateBookingStatus = async (req, res, next) => {
             booking.appointmentDate = new Date(
                 `${dateStr}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`
             );
+            booking.doctorId = doctorId;
+            booking.assignedBy = req.user.id;
         }
 
         booking.status = status;
         await booking.save();
+
+        emitBookingListChange(booking, 'statusChanged');
 
         // إرسال إشعار (non-blocking)
         notifyBookingStatusChange(booking, status).catch(err =>
@@ -546,13 +572,15 @@ exports.updateBookingStatus = async (req, res, next) => {
 exports.updateBooking = async (req, res, next) => {
     try {
         const { id } = req.params;
-        const { name, phone, date, amountPaid, visitType } = req.body;
+        const { name, phone, date, amountPaid, visitType, doctorId } = req.body;
 
         const booking = await Booking.findByPk(id);
 
         if (!booking) {
             return res.status(404).json({ message: 'Booking not found.' });
         }
+
+        const prevDateStr = getBookingDateStr(booking);
 
         // Validate visitType if provided (قيم قديمة أو أنواع الإجراءات)
         const allowedLegacy = ['checkup', 'followup', 'consultation'];
@@ -567,9 +595,10 @@ exports.updateBooking = async (req, res, next) => {
         if (name) booking.customerName = name;
         if (phone) booking.customerPhone = phone;
         if (amountPaid !== undefined) booking.amountPaid = amountPaid;
+        if (doctorId !== undefined) booking.doctorId = Number(doctorId);
         if (visitType) {
             if (CLINIC_PROCEDURE_TYPES.includes(visitType)) {
-                booking.visitType = 'checkup';
+                booking.visitType = visitType === 'إعادة' ? 'followup' : 'checkup';
                 booking.procedureType = visitType;
             } else {
                 booking.visitType = visitType;
@@ -583,7 +612,10 @@ exports.updateBooking = async (req, res, next) => {
             const newDateStr = String(date).trim().slice(0, 10);
 
             // تحقق من وجود يوم عمل نشط
-            const workingDay = await workingDayService.getWorkingDayByDate(newDateStr);
+            if (!booking.doctorId) {
+                return res.status(400).json({ message: 'doctorId is required before assigning appointment date.' });
+            }
+            const workingDay = await workingDayService.getWorkingDayByDate(newDateStr, booking.doctorId);
             if (!workingDay) {
                 return res.status(400).json({
                     message: `لا يمكن تحديد موعد في ${newDateStr} — لم يتم تحديد يوم عمل نشط لهذا التاريخ. / No active working day is set for ${newDateStr}.`
@@ -592,7 +624,7 @@ exports.updateBooking = async (req, res, next) => {
 
             // تحقق من الطاقة الاستيعابية (استثناء الحجز الحالي من العداد)
             const capacity = calculateCapacity(workingDay.startTime, workingDay.endTime);
-            const currentCount = await getActiveBookingsCount(newDateStr, booking.id);
+            const currentCount = await getActiveBookingsCount(newDateStr, booking.doctorId, booking.id);
             if (currentCount >= capacity) {
                 return res.status(409).json({
                     message: `الوقت انتهى — لا يمكن إضافة حجوزات جديدة في ${newDateStr}. / Booking slots are full for ${newDateStr}.`,
@@ -609,6 +641,8 @@ exports.updateBooking = async (req, res, next) => {
         }
 
         await booking.save();
+
+        emitBookingListChange(booking, 'updated', prevDateStr);
 
         res.status(200).json({
             message: 'Booking updated successfully.',
@@ -632,6 +666,8 @@ exports.cancelBooking = async (req, res, next) => {
 
         booking.status = 'cancelled';
         await booking.save();
+
+        emitBookingListChange(booking, 'cancelled');
 
         res.status(200).json({
             message: 'Booking cancelled successfully.',
@@ -671,10 +707,7 @@ exports.updateExaminationStatus = async (req, res, next) => {
         await booking.save();
         await booking.reload();
 
-        const dateStr = getBookingDateStr(booking);
-        if (dateStr) {
-            emitBookingUpdateForDate(dateStr, { action: 'examinationStatus', booking: booking.toJSON() });
-        }
+        emitBookingListChange(booking, 'examinationStatus');
 
         res.status(200).json({
             message: value === 'done' ? 'Examination marked as done (تم الكشف).' : 'Examination status set to waiting (في الانتظار).',
@@ -694,6 +727,9 @@ exports.updateExaminationStatus = async (req, res, next) => {
 exports.getBookingWithHistory = async (req, res, next) => {
     try {
         const { id } = req.params;
+        const doctorScopeId = req.user && req.user.role === 'doctor'
+            ? (req.user.doctorProfile && req.user.doctorProfile.id)
+            : null;
 
         // Get the current booking with report and medications
         const currentBooking = await Booking.findByPk(id, {
@@ -703,14 +739,22 @@ exports.getBookingWithHistory = async (req, res, next) => {
         if (!currentBooking) {
             return res.status(404).json({ message: 'Booking not found.' });
         }
+        if (doctorScopeId && Number(currentBooking.doctorId) !== Number(doctorScopeId)) {
+            return res.status(403).json({ message: 'Access denied. This booking does not belong to this doctor.' });
+        }
 
         // Get all past bookings with the same phone number (with report + medications)
+        const pastWhere = {
+            customerPhone: currentBooking.customerPhone,
+            id: { [Op.ne]: currentBooking.id },
+            appointmentDate: { [Op.lt]: new Date() }
+        };
+        if (doctorScopeId) {
+            // Doctor must only see this patient's visits with the same doctor.
+            pastWhere.doctorId = doctorScopeId;
+        }
         const pastBookings = await Booking.findAll({
-            where: {
-                customerPhone: currentBooking.customerPhone,
-                id: { [Op.ne]: currentBooking.id },
-                appointmentDate: { [Op.lt]: new Date() }
-            },
+            where: pastWhere,
             order: [['appointmentDate', 'DESC']],
             include: reportWithMedicationsInclude
         });

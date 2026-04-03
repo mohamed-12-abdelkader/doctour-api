@@ -82,6 +82,16 @@ const Booking = sequelize.define('Booking', {
         type: DataTypes.STRING(5),
         allowNull: true,
         comment: 'الوقت المفضل للحجز الأونلاين مثل 10:00'
+    },
+    doctorId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: 'FK to DoctorProfile (required for clinic and confirmed online bookings)'
+    },
+    assignedBy: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: 'Admin/Secretary user id who assigned this booking'
     }
 }, {
     timestamps: true

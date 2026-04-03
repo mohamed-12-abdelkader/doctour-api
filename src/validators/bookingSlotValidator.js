@@ -13,7 +13,7 @@ function validateDateQuery(date) {
 }
 
 function validateCreateSlotBooking(body) {
-    const { patientId, date, timeSlot, bookingType } = body || {};
+    const { patientId, date, timeSlot, bookingType, doctorId } = body || {};
     if (patientId == null || (typeof patientId !== 'number' && (typeof patientId !== 'string' || !/^\d+$/.test(String(patientId))))) {
         return { error: 'معرف المريض مطلوب' };
     }
@@ -22,6 +22,9 @@ function validateCreateSlotBooking(body) {
     }
     if (!timeSlot || !TIME_REGEX.test(String(timeSlot).trim())) {
         return { error: 'موعد الحجز مطلوب بصيغة HH:mm' };
+    }
+    if (doctorId == null || !/^\d+$/.test(String(doctorId))) {
+        return { error: 'doctorId مطلوب' };
     }
     const type = (bookingType || 'online').toLowerCase();
     if (type !== 'online' && type !== 'clinic') {

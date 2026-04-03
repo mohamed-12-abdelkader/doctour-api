@@ -4,16 +4,17 @@ const { Op } = require('sequelize');
 /**
  * Set or update working hours for a specific date. Creates or updates one record per date.
  */
-async function setWorkingHours(date, startTime, endTime, adminId) {
+async function setWorkingHours(date, startTime, endTime, adminId, doctorId) {
     const [wd, created] = await WorkingDay.upsert(
         {
             date,
             startTime: String(startTime).trim(),
             endTime: String(endTime).trim(),
+            doctorId,
             isActive: true,
             createdBy: adminId
         },
-        { conflictFields: ['date'] }
+        { conflictFields: ['doctorId', 'date'] }
     );
     return wd;
 }
@@ -27,6 +28,7 @@ async function updateWorkingHours(id, payload) {
     if (payload.date !== undefined) wd.date = payload.date;
     if (payload.startTime !== undefined) wd.startTime = String(payload.startTime).trim();
     if (payload.endTime !== undefined) wd.endTime = String(payload.endTime).trim();
+    if (payload.doctorId !== undefined) wd.doctorId = payload.doctorId;
     if (payload.isActive !== undefined) wd.isActive = !!payload.isActive;
     await wd.save();
     return wd;
@@ -35,9 +37,9 @@ async function updateWorkingHours(id, payload) {
 /**
  * Get working day for a specific date. Returns null if not set or inactive.
  */
-async function getWorkingDayByDate(date) {
+async function getWorkingDayByDate(date, doctorId) {
     const wd = await WorkingDay.findOne({
-        where: { date, isActive: true }
+        where: { date, doctorId, isActive: true }
     });
     return wd;
 }
@@ -45,8 +47,9 @@ async function getWorkingDayByDate(date) {
 /**
  * List working days (optional date range).
  */
-async function listWorkingDays({ startDate, endDate, limit = 100 } = {}) {
+async function listWorkingDays({ startDate, endDate, doctorId, limit = 100 } = {}) {
     const where = {};
+    if (doctorId) where.doctorId = doctorId;
     if (startDate || endDate) {
         where.date = {};
         if (startDate) where.date[Op.gte] = startDate;

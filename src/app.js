@@ -10,6 +10,7 @@ const accountRoutes = require('./routes/accountRoutes');
 const workingDayRoutes = require('./routes/workingDayRoutes');
 const patientRoutes = require('./routes/patientRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const doctorRoutes = require('./routes/doctorRoutes');
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
@@ -34,6 +35,7 @@ app.use('/api/accounts', accountRoutes);
 app.use('/api/admin/working-days', workingDayRoutes);
 app.use('/api/patients', patientRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/doctors', doctorRoutes);
 
 // 404 Handler
 app.use((req, res, next) => {

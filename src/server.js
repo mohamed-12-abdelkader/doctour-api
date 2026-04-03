@@ -77,6 +77,47 @@ const startServer = async () => {
                 const dateStr = date && String(date).trim().slice(0, 10);
                 if (dateStr) socket.leave(`bookings:${dateStr}`);
             });
+            /** اشتراك بعدة أيام (مثل فلتر startDate & endDate في /api/bookings/all) — حد أقصى 62 يوم */
+            socket.on('bookings:subscribeRange', (payload) => {
+                const startStr = payload && String(payload.startDate || '').trim().slice(0, 10);
+                const endStr = payload && String(payload.endDate || '').trim().slice(0, 10);
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(startStr) || !/^\d{4}-\d{2}-\d{2}$/.test(endStr)) return;
+                const [sy, sm, sd] = startStr.split('-').map(Number);
+                const [ey, em, ed] = endStr.split('-').map(Number);
+                const start = new Date(Date.UTC(sy, sm - 1, sd));
+                const end = new Date(Date.UTC(ey, em - 1, ed));
+                if (start > end) return;
+                let d = new Date(start);
+                let n = 0;
+                while (d <= end && n < 62) {
+                    const y = d.getUTCFullYear();
+                    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+                    const day = String(d.getUTCDate()).padStart(2, '0');
+                    socket.join(`bookings:${y}-${m}-${day}`);
+                    d.setUTCDate(d.getUTCDate() + 1);
+                    n++;
+                }
+            });
+            socket.on('bookings:unsubscribeRange', (payload) => {
+                const startStr = payload && String(payload.startDate || '').trim().slice(0, 10);
+                const endStr = payload && String(payload.endDate || '').trim().slice(0, 10);
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(startStr) || !/^\d{4}-\d{2}-\d{2}$/.test(endStr)) return;
+                const [sy, sm, sd] = startStr.split('-').map(Number);
+                const [ey, em, ed] = endStr.split('-').map(Number);
+                const start = new Date(Date.UTC(sy, sm - 1, sd));
+                const end = new Date(Date.UTC(ey, em - 1, ed));
+                if (start > end) return;
+                let d = new Date(start);
+                let n = 0;
+                while (d <= end && n < 62) {
+                    const y = d.getUTCFullYear();
+                    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+                    const day = String(d.getUTCDate()).padStart(2, '0');
+                    socket.leave(`bookings:${y}-${m}-${day}`);
+                    d.setUTCDate(d.getUTCDate() + 1);
+                    n++;
+                }
+            });
         });
         setIO(io);
         httpServer.listen(PORT, () => {

@@ -1,6 +1,60 @@
-const { Booking, IncomeEntry, Expense, ExpenseCategory, ExpenseSubcategory } = require('../models/index');
+const { Booking, IncomeEntry, Expense, ExpenseCategory, ExpenseSubcategory, DoctorProfile, User } = require('../models/index');
 const { Op } = require('sequelize');
 const sequelize = require('sequelize');
+
+/**
+ * مجموع amountPaid للحجوزات في الفترة، مجمّع حسب doctorId، مع أسماء الأطباء.
+ */
+async function getBookingIncomeByDoctor(appointmentWhere) {
+    const rows = await Booking.findAll({
+        attributes: [
+            'doctorId',
+            [sequelize.fn('SUM', sequelize.cast(sequelize.col('amountPaid'), 'DECIMAL')), 'total']
+        ],
+        where: appointmentWhere,
+        group: ['doctorId'],
+        raw: true
+    });
+
+    const doctorIds = rows.map(r => r.doctorId).filter(id => id != null);
+    let profiles = [];
+    if (doctorIds.length > 0) {
+        profiles = await DoctorProfile.findAll({
+            where: { id: doctorIds },
+            include: [{ model: User, as: 'user', attributes: ['id', 'name', 'email'] }],
+            attributes: ['id', 'specialty', 'phone']
+        });
+    }
+    const profileById = {};
+    for (const p of profiles) {
+        const plain = p.get ? p.get({ plain: true }) : p;
+        profileById[plain.id] = plain;
+    }
+
+    const byDoctor = rows.map(r => {
+        const amt = parseFloat(r.total || 0);
+        const id = r.doctorId;
+        if (id == null) {
+            return {
+                doctorId: null,
+                doctorName: 'بدون طبيب',
+                specialty: null,
+                amount: Math.round(amt * 100) / 100
+            };
+        }
+        const prof = profileById[id];
+        const user = prof && prof.user;
+        return {
+            doctorId: id,
+            doctorName: user ? user.name : `Doctor #${id}`,
+            specialty: prof ? prof.specialty : null,
+            amount: Math.round(amt * 100) / 100
+        };
+    });
+
+    const sumByDoctor = byDoctor.reduce((s, x) => s + x.amount, 0);
+    return { byDoctor, sumByDoctor: Math.round(sumByDoctor * 100) / 100 };
+}
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_REGEX = /^\d{4}-\d{2}$/;
@@ -82,10 +136,18 @@ exports.getIncomeFromBookings = async (req, res, next) => {
 
         const total = rows.reduce((sum, r) => sum + r.amount, 0);
 
+        const bookingWhere = {
+            appointmentDate: { [Op.between]: [start, end] },
+            status: { [Op.notIn]: ['cancelled', 'rejected'] }
+        };
+        const { byDoctor, sumByDoctor } = await getBookingIncomeByDoctor(bookingWhere);
+
         res.status(200).json({
             period: periodLabel,
             byCustomer: rows,
-            total: Math.round(total * 100) / 100
+            byDoctor,
+            total: Math.round(total * 100) / 100,
+            totalByDoctor: sumByDoctor
         });
     } catch (error) {
         next(error);
@@ -379,6 +441,8 @@ exports.getSummary = async (req, res, next) => {
         };
         const incomeFromBookings = parseFloat(await Booking.sum('amountPaid', { where: bookingWhere }) || 0);
 
+        const { byDoctor: incomeFromBookingsByDoctor } = await getBookingIncomeByDoctor(bookingWhere);
+
         const manualIncome = parseFloat(await IncomeEntry.sum('amount', {
             where: { entryDate: { [Op.between]: [start, end] } }
         }) || 0);
@@ -393,10 +457,13 @@ exports.getSummary = async (req, res, next) => {
         res.status(200).json({
             period: periodLabel,
             incomeFromBookings: Math.round(incomeFromBookings * 100) / 100,
+            incomeFromBookingsByDoctor,
             manualIncome: Math.round(manualIncome * 100) / 100,
             totalIncome: Math.round(totalIncome * 100) / 100,
             totalExpenses: Math.round(totalExpenses * 100) / 100,
-            balance: Math.round(balance * 100) / 100
+            balance: Math.round(balance * 100) / 100,
+            note:
+                'الدخل اليدوي والمصروفات على مستوى العيادة (غير موزعة على الأطباء). دخل الحجوزات موزّع في incomeFromBookingsByDoctor.'
         });
     } catch (error) {
         next(error);

@@ -10,7 +10,6 @@ const WorkingDay = sequelize.define('WorkingDay', {
     date: {
         type: DataTypes.DATEONLY,
         allowNull: false,
-        unique: true,
         comment: 'تاريخ العمل YYYY-MM-DD'
     },
     startTime: {
@@ -22,6 +21,11 @@ const WorkingDay = sequelize.define('WorkingDay', {
         type: DataTypes.STRING(5),
         allowNull: false,
         comment: 'وقت النهاية مثل 18:00'
+    },
+    doctorId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: 'FK to DoctorProfile'
     },
     isActive: {
         type: DataTypes.BOOLEAN,
