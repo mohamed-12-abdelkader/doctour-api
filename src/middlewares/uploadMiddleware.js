@@ -29,6 +29,7 @@ const fileFilter = (req, file, cb) => {
     if (allowed.includes(file.mimetype)) {
         cb(null, true);
     } else {
+        console.log("error from file uploadd")
         cb(new Error('نوع الملف غير مسموح. استخدم: JPEG, PNG, WEBP, PDF / File type not allowed. Use: JPEG, PNG, WEBP, or PDF.'), false);
     }
 };

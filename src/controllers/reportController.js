@@ -33,6 +33,7 @@ function parseMedications(raw) {
 // Fields: medicalCondition?, notes?, medications? (JSON string), prescription? (file)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.createReport = async (req, res, next) => {
+    console.log("request send")
     try {
         const { id } = req.params;
         const { medicalCondition, notes, medications: medicationsRaw } = req.body;

@@ -99,9 +99,50 @@ router.get('/all', protect, (req, res, next) => {
 // Examination status: admin, secretary/staff, or booking owner doctor
 router.patch('/:id/examination-status', protect, doctorOwnBookingForExamination, bookingController.updateExaminationStatus);
 
+const multer = require('multer');
+
+const uploadPrescription = (fieldName = 'prescription') => {
+    return (req, res, next) => {
+        const handler = upload.single(fieldName);
+
+        handler(req, res, (err) => {
+            if (err) {
+                console.error("error", err)
+                // 🔴 Log full error (for debugging)
+                console.error('Upload error:', {
+                    message: err.message,
+                    stack: err.stack,
+                    field: fieldName,
+                    user: req.user?.id,
+                });
+
+                // 🔴 Multer-specific errors
+                if (err instanceof multer.MulterError) {
+                    return res.status(400).json({
+                        message: `Multer error: ${err.message}`
+                    });
+                }
+
+                // 🔴 Custom / fileFilter errors
+                return res.status(400).json({
+                    message: err.message || 'File upload failed'
+                });
+            }
+
+            next();
+        });
+    };
+};
+
 // Patient reports: Admin or Doctor (doctor must own this booking)
 // Content-Type: multipart/form-data | field name for image: 'prescription'
-router.post('/:id/reports', protect, doctorOwnBookingOrDailyPermission, upload.single('prescription'), reportController.createReport);
+router.post('/:id/reports', protect, doctorOwnBookingOrDailyPermission, router.post(
+    '/:id/reports',
+    protect,
+    doctorOwnBookingOrDailyPermission,
+    uploadPrescription('prescription'),
+    reportController.createReport
+), reportController.createReport);
 router.get('/:id/reports', protect, doctorOwnBookingOrDailyPermission, reportController.getReports);
 router.get('/:id/reports/:reportId', protect, doctorOwnBookingOrDailyPermission, reportController.getReport);
 router.put('/:id/reports/:reportId', protect, doctorOwnBookingOrDailyPermission, upload.single('prescription'), reportController.updateReport);
