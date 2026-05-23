@@ -112,12 +112,12 @@ const runSlotBookingMigration = async () => {
       CREATE INDEX IF NOT EXISTS "bookings_slot_date_time"
       ON "Bookings" ("slotDate", "timeSlot")
       WHERE "slotDate" IS NOT NULL AND "timeSlot" IS NOT NULL;
-    `).catch(() => {});
+    `).catch(() => { });
     await sequelize.query(`
       CREATE INDEX IF NOT EXISTS "bookings_patient_slot"
       ON "Bookings" ("patientId", "slotDate", "timeSlot")
       WHERE "patientId" IS NOT NULL AND "slotDate" IS NOT NULL AND "timeSlot" IS NOT NULL;
-    `).catch(() => {});
+    `).catch(() => { });
     console.log('✅ Slot booking migration applied.');
   } catch (err) {
     console.warn('⚠️ Slot booking migration skip:', err.message);
@@ -152,8 +152,8 @@ const runMultiDoctorMigration = async () => {
     }
 
     await sequelize.query(`ALTER TABLE "WorkingDays" ADD COLUMN IF NOT EXISTS "doctorId" INTEGER;`);
-    await sequelize.query(`ALTER TABLE "WorkingDays" DROP CONSTRAINT IF EXISTS "WorkingDays_date_key";`).catch(() => {});
-    await sequelize.query(`DROP INDEX IF EXISTS "WorkingDays_date";`).catch(() => {});
+    await sequelize.query(`ALTER TABLE "WorkingDays" DROP CONSTRAINT IF EXISTS "WorkingDays_date_key";`).catch(() => { });
+    await sequelize.query(`DROP INDEX IF EXISTS "WorkingDays_date";`).catch(() => { });
     await sequelize.query(`CREATE INDEX IF NOT EXISTS "working_days_doctor_date_idx" ON "WorkingDays" ("doctorId", "date");`);
     await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS "working_days_doctor_date_unique_idx" ON "WorkingDays" ("doctorId", "date");`);
 
@@ -245,6 +245,18 @@ const runExpensesClassificationMigration = async () => {
         UNIQUE ("categoryId", name)
       );
     `);
+
+    await sequelize.query(`
+      ALTER TABLE expense_categories
+      ALTER COLUMN "createdAt" SET DEFAULT NOW(),
+      ALTER COLUMN "updatedAt" SET DEFAULT NOW();
+    `).catch(() => { });
+
+    await sequelize.query(`
+      ALTER TABLE expense_subcategories
+      ALTER COLUMN "createdAt" SET DEFAULT NOW(),
+      ALTER COLUMN "updatedAt" SET DEFAULT NOW();
+    `).catch(() => { });
 
     // Add columns to existing Expenses table (keep them nullable for backward compatibility)
     await sequelize.query(`
