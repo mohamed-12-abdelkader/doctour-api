@@ -13,6 +13,7 @@ const Expense = require('./expense');
 const ExpenseCategory = require('./expenseCategory');
 const ExpenseSubcategory = require('./expenseSubcategory');
 const Notification = require('./Notification');
+const ClinicService = require('./clinicService');
 
 const UserPermission = sequelize.define('UserPermission', {
     userId: {
@@ -76,5 +77,6 @@ module.exports = {
     Expense,
     ExpenseCategory,
     ExpenseSubcategory,
-    Notification
+    Notification,
+    ClinicService
 };

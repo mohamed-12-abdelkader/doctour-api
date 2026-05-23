@@ -29,8 +29,8 @@ const seedPermissions = async () => {
 
 const seedAdmin = async () => {
     try {
-        const adminEmail = 'admin@example.com';
-        const adminPassword = 'admin123';
+        const adminEmail = 'dr-reematef130@gmail.com';
+        const adminPassword = 'reem130$';
 
         const existingAdmin = await User.findOne({ where: { email: adminEmail } });
         if (!existingAdmin) {

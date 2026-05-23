@@ -5,25 +5,20 @@ const bookingSlotService = require('../services/bookingSlotService');
 const { notifyNewOnlineBooking, notifyBookingStatusChange } = require('../services/notificationService');
 const { emitBookingListChange } = require('../socket');
 const { parseTimeToMinutes, minutesToTimeStr, SLOT_DURATION_MINUTES, normalizeTimeSlot } = require('../utils/slotHelper');
-
-// قائمة أنواع الزيارة التفصيلية المتاحة لحجوزات العيادة
-const CLINIC_PROCEDURE_TYPES = [
-    'كشف',
-    'إعادة',
-    'Botox',
-    'filler',
-    'تنعيم علاجي للشعر',
-    'Skin booster',
-    'جلسة أوكسجينو',
-    'تقشير بارد',
-    'تقشير كيميائي',
-    'ديرما بن بلازما أو ميزو',
-    'جلسة تساقط الشعر',
-    'إزالة الزوائد الجلدية',
-    'توريد علاجي للشفايف',
-    'تنضيف بشرة Basic',
-    'تنضيف بشرة عميق'
-];
+const {
+    parseProcedureTypesFromBody,
+    validateProcedureTypes,
+    resolveLegacyVisitEnum,
+    procedureTypesToLegacyString,
+    enrichBookingProcedures
+} = require('../utils/clinicProcedureHelper');
+const {
+    getActiveServiceNames,
+    getFollowupServiceNames
+} = require('../services/clinicServiceCatalog');
+const { createClinicBookingAtomic } = require('../services/clinicBookingService');
+const { validatePaymentMethod, enrichPaymentMethod } = require('../utils/paymentMethodHelper');
+const { PAYMENT_METHODS, PAYMENT_METHOD_LABELS } = require('../constants/paymentMethods');
 
 const reportWithMedicationsInclude = [
     {
@@ -252,49 +247,60 @@ exports.createBooking = async (req, res, next) => {
 // Protected: Create a clinic booking (Admin/Staff with manage_daily_bookings)
 exports.createClinicBooking = async (req, res, next) => {
     try {
-        const { name, phone, date, time, amountPaid, visitType, doctorId } = req.body;
+        const { name, phone, date, amountPaid, doctorId, clientRequestId, age, paymentMethod } = req.body;
 
         if (!name || !phone || !date || !doctorId) {
             return res.status(400).json({ message: 'Please provide name, phone, appointment date, and doctorId.' });
         }
 
-        // Validate visitType (procedure name) if provided
-        if (visitType && !CLINIC_PROCEDURE_TYPES.includes(visitType)) {
+        const paymentValidation = validatePaymentMethod(paymentMethod, { required: true });
+        if (!paymentValidation.valid) {
             return res.status(400).json({
-                message: 'Invalid visitType. Use one of predefined clinic procedures.',
-                allowedVisitTypes: CLINIC_PROCEDURE_TYPES
+                message: paymentValidation.message,
+                allowedPaymentMethods: paymentValidation.allowedPaymentMethods || PAYMENT_METHODS,
+                paymentMethodLabels: paymentValidation.labels || PAYMENT_METHOD_LABELS
             });
         }
 
-        // توحيد التاريخ ليكون ضمن نفس اليوم عند الفلترة (YYYY-MM-DD → منتصف اليوم UTC)
+        const procedureTypes = parseProcedureTypesFromBody(req.body);
+        const [allowedServices, followupServices] = await Promise.all([
+            getActiveServiceNames(),
+            getFollowupServiceNames()
+        ]);
+        const procedureValidation = validateProcedureTypes(procedureTypes, allowedServices);
+        if (!procedureValidation.valid) {
+            return res.status(400).json({
+                message: procedureValidation.message,
+                invalid: procedureValidation.invalid,
+                allowedVisitTypes: procedureValidation.allowedVisitTypes
+            });
+        }
+
         const dateStr = String(date).trim().slice(0, 10);
 
-        // ❌ منع إنشاء حجز لو الأدمن مش محدد يوم عمل لهذا التاريخ
-        const workingDay = await workingDayService.getWorkingDayByDate(dateStr, Number(doctorId));
-        if (!workingDay) {
-            return res.status(400).json({
-                message: `لا يمكن إنشاء حجز في ${dateStr} — لم يتم تحديد يوم عمل نشط لهذا التاريخ. / No active working day is set for ${dateStr}. Please configure working hours first.`
-            });
-        }
+        const allowExtraBooking =
+            req.body.allowExtraBooking === true ||
+            req.body.allowExtraBooking === 'true' ||
+            req.body.extraBooking === true ||
+            req.body.extraBooking === 'true';
 
-        // ❌ منع إنشاء حجز لو الطاقة الاستيعابية امتلأت
-        const capacity = calculateCapacity(workingDay.startTime, workingDay.endTime);
-        const currentCount = await getActiveBookingsCount(dateStr, Number(doctorId));
-        if (currentCount >= capacity) {
-            return res.status(409).json({
-                message: `الوقت انتهى — لا يمكن إضافة حجوزات جديدة في ${dateStr}. / Booking slots are full for ${dateStr}.`,
-                details: {
-                    date: dateStr,
-                    workingHours: `${workingDay.startTime} → ${workingDay.endTime}`,
-                    maxBookings: capacity,
-                    currentBookings: currentCount
-                }
-            });
-        }
+        const noTime =
+            req.body.noTime === true ||
+            req.body.noTime === 'true';
 
-        let appointmentDate;
-        if (time && /^\d{1,2}:\d{2}$/.test(String(time).trim())) {
-            const [h, m] = String(time).trim().split(':').map(Number);
+        const rawTime = req.body.time;
+        const hasExplicitTime =
+            rawTime !== undefined &&
+            rawTime !== null &&
+            String(rawTime).trim() !== '';
+
+        let appointmentDate = null;
+        let slotDate = null;
+
+        if (noTime) {
+            slotDate = dateStr;
+        } else if (hasExplicitTime && /^\d{1,2}:\d{2}$/.test(String(rawTime).trim())) {
+            const [h, m] = String(rawTime).trim().split(':').map(Number);
             if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
                 const timePart = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
                 appointmentDate = new Date(dateStr + 'T' + timePart);
@@ -307,28 +313,82 @@ exports.createClinicBooking = async (req, res, next) => {
             appointmentDate = new Date(date);
         }
 
-        const legacyVisitEnum = visitType === 'إعادة'
-            ? 'followup'
-            : 'checkup';
+        const legacyVisitEnum = resolveLegacyVisitEnum(procedureTypes, followupServices);
+        const procedureType = procedureTypesToLegacyString(procedureTypes);
 
-        const booking = await Booking.create({
-            customerName: name,
-            customerPhone: phone,
-            doctorId: Number(doctorId),
-            assignedBy: req.user.id,
-            appointmentDate,
-            bookingType: 'clinic',
-            amountPaid: amountPaid || 0,
-            visitType: legacyVisitEnum,
-            procedureType: visitType || null,
-            status: 'confirmed' // Clinic bookings are confirmed by default
-        });
+        let result;
+        try {
+            result = await createClinicBookingAtomic({
+                dateStr,
+                doctorId,
+                name,
+                phone,
+                appointmentDate,
+                slotDate,
+                amountPaid,
+                paymentMethod: paymentValidation.value,
+                visitType: legacyVisitEnum,
+                procedureType,
+                procedureTypes: procedureTypes.length > 0 ? procedureTypes : null,
+                assignedBy: req.user.id,
+                age,
+                clientRequestId,
+                allowExtraBooking
+            });
+        } catch (err) {
+            if (err.code === 'CAPACITY_FULL') {
+                return res.status(409).json({
+                    message: `الوقت انتهى — لا يمكن إضافة حجوزات جديدة في ${dateStr}. أرسل allowExtraBooking: true لإضافة حجز إضافي. / Booking slots are full for ${dateStr}.`,
+                    details: err.details
+                });
+            }
+            if (err.name === 'SequelizeUniqueConstraintError') {
+                const existing = await Booking.findOne({
+                    where: {
+                        clientRequestId: String(clientRequestId).trim(),
+                        bookingType: 'clinic'
+                    }
+                });
+                if (existing) {
+                    return res.status(200).json({
+                        message: 'Clinic booking already exists.',
+                        duplicate: true,
+                        booking: enrichPaymentMethod(enrichBookingProcedures(existing.get({ plain: true })))
+                    });
+                }
+            }
+            throw err;
+        }
 
-        emitBookingListChange(booking, 'created');
+        const { booking, duplicate, isExtraBooking, workingDayAutoCreated, workingHours } = result;
+        const plain = enrichPaymentMethod(enrichBookingProcedures(booking.get({ plain: true })));
 
-        res.status(201).json({
-            message: 'Clinic booking created successfully.',
-            booking
+        if (!duplicate) {
+            emitBookingListChange(booking, 'created');
+        }
+
+        res.status(duplicate ? 200 : 201).json({
+            message: duplicate
+                ? 'Clinic booking already exists (duplicate request ignored).'
+                : isExtraBooking
+                    ? 'Extra clinic booking created (beyond daily capacity).'
+                    : noTime
+                        ? 'Clinic booking created for the day without a specific time.'
+                        : 'Clinic booking created successfully.',
+            duplicate: !!duplicate,
+            isExtraBooking: !!isExtraBooking,
+            workingDayAutoCreated: !!workingDayAutoCreated,
+            workingHours: workingHours || null,
+            hasSpecificTime: !noTime && !!appointmentDate,
+            booking: {
+                ...plain,
+                appointmentTime: getBookingTimeStr(booking, true),
+                appointmentTime24: getBookingTimeStr(booking, false),
+                hasSpecificTime: !noTime && !!appointmentDate,
+                isExtraBooking: !!isExtraBooking,
+                workingDayAutoCreated: !!workingDayAutoCreated,
+                workingHours: workingHours || null
+            }
         });
     } catch (error) {
         next(error);
@@ -405,14 +465,21 @@ exports.getAllBookings = async (req, res, next) => {
         // ── فلتر visitType ──────────────────────────────────────────────
         const allowedLegacyVisit = ['checkup', 'followup', 'consultation'];
         if (visitType) {
+            const activeServices = await getActiveServiceNames();
             if (allowedLegacyVisit.includes(visitType)) {
                 whereClause.visitType = visitType;
-            } else if (CLINIC_PROCEDURE_TYPES.includes(visitType)) {
-                whereClause.procedureType = visitType;
+            } else if (activeServices.includes(visitType)) {
+                whereClause[Op.and] = whereClause[Op.and] || [];
+                whereClause[Op.and].push({
+                    [Op.or]: [
+                        { procedureType: visitType },
+                        { procedureTypes: { [Op.contains]: [visitType] } }
+                    ]
+                });
             } else {
                 return res.status(400).json({
-                    message: 'Invalid visitType. Use checkup, followup, consultation, or one of predefined clinic procedures.',
-                    allowedVisitTypes: [...allowedLegacyVisit, ...CLINIC_PROCEDURE_TYPES]
+                    message: 'Invalid visitType. Use checkup, followup, consultation, or one of active clinic services.',
+                    allowedVisitTypes: [...allowedLegacyVisit, ...activeServices]
                 });
             }
         }
@@ -422,23 +489,27 @@ exports.getAllBookings = async (req, res, next) => {
             whereClause[Op.and] = whereClause[Op.and] || [];
 
             if (date) {
-                // يوم واحد محدد — الأولوية لـ date على startDate/endDate
+                // يوم واحد محدد — appointmentDate أو slotDate (حجز بدون وقت)
                 const dateStr = String(date).trim().slice(0, 10);
                 const startOfDay = new Date(dateStr + 'T00:00:00.000Z');
                 const endOfDay = new Date(dateStr + 'T23:59:59.999Z');
                 whereClause[Op.and].push({
-                    appointmentDate: { [Op.between]: [startOfDay, endOfDay] }
+                    [Op.or]: [
+                        { appointmentDate: { [Op.between]: [startOfDay, endOfDay] } },
+                        { slotDate: dateStr }
+                    ]
                 });
             } else {
-                // نطاق تاريخ ─ startDate و/أو endDate
-                const dateFilter = {};
+                const apptFilter = {};
+                const slotFilter = {};
 
                 if (startDate) {
                     const startStr = String(startDate).trim().slice(0, 10);
                     if (!/^\d{4}-\d{2}-\d{2}$/.test(startStr)) {
                         return res.status(400).json({ message: 'Invalid startDate format. Use YYYY-MM-DD.' });
                     }
-                    dateFilter[Op.gte] = new Date(startStr + 'T00:00:00.000Z');
+                    apptFilter[Op.gte] = new Date(startStr + 'T00:00:00.000Z');
+                    slotFilter[Op.gte] = startStr;
                 }
 
                 if (endDate) {
@@ -446,25 +517,37 @@ exports.getAllBookings = async (req, res, next) => {
                     if (!/^\d{4}-\d{2}-\d{2}$/.test(endStr)) {
                         return res.status(400).json({ message: 'Invalid endDate format. Use YYYY-MM-DD.' });
                     }
-                    dateFilter[Op.lte] = new Date(endStr + 'T23:59:59.999Z');
+                    apptFilter[Op.lte] = new Date(endStr + 'T23:59:59.999Z');
+                    slotFilter[Op.lte] = endStr;
                 }
 
-                whereClause[Op.and].push({ appointmentDate: dateFilter });
+                const dateBranches = [];
+                if (Object.keys(apptFilter).length > 0) {
+                    dateBranches.push({ appointmentDate: apptFilter });
+                }
+                if (Object.keys(slotFilter).length > 0) {
+                    dateBranches.push({ slotDate: slotFilter });
+                }
+                if (dateBranches.length > 0) {
+                    whereClause[Op.and].push({ [Op.or]: dateBranches });
+                }
             }
         }
 
         const bookings = await Booking.findAll({
             where: whereClause,
-            order: [['appointmentDate', 'ASC'], ['id', 'ASC']]
+            order: [['slotDate', 'ASC'], ['appointmentDate', 'ASC'], ['id', 'ASC']]
         });
 
         const list = bookings.map(b => {
             const plain = b.get ? b.get({ plain: true }) : b;
-            return {
-                ...plain,
+            return enrichPaymentMethod({
+                ...enrichBookingProcedures(plain),
                 appointmentTime: getBookingTimeStr(b, true),
-                appointmentTime24: getBookingTimeStr(b, false)
-            };
+                appointmentTime24: getBookingTimeStr(b, false),
+                hasSpecificTime: !!b.appointmentDate,
+                isExtraBooking: !!plain.isExtraBooking
+            });
         });
 
         res.status(200).json({ total: list.length, bookings: list });
@@ -582,29 +665,60 @@ exports.updateBooking = async (req, res, next) => {
 
         const prevDateStr = getBookingDateStr(booking);
 
-        // Validate visitType if provided (قيم قديمة أو أنواع الإجراءات)
-        const allowedLegacy = ['checkup', 'followup', 'consultation'];
-        if (visitType && !allowedLegacy.includes(visitType) && !CLINIC_PROCEDURE_TYPES.includes(visitType)) {
-            return res.status(400).json({
-                message: 'Invalid visitType. Use checkup, followup, consultation, or one of predefined clinic procedures.',
-                allowedVisitTypes: [...allowedLegacy, ...CLINIC_PROCEDURE_TYPES]
-            });
+        const hasProcedurePayload =
+            req.body.visitTypes !== undefined ||
+            req.body.procedureTypes !== undefined ||
+            req.body.services !== undefined ||
+            visitType !== undefined;
+
+        if (hasProcedurePayload) {
+            const procedureTypes = parseProcedureTypesFromBody(req.body);
+            const [allowedServices, followupServices] = await Promise.all([
+                getActiveServiceNames(),
+                getFollowupServiceNames()
+            ]);
+            const procedureValidation = validateProcedureTypes(procedureTypes, allowedServices);
+            if (!procedureValidation.valid) {
+                return res.status(400).json({
+                    message: procedureValidation.message,
+                    invalid: procedureValidation.invalid,
+                    allowedVisitTypes: procedureValidation.allowedVisitTypes
+                });
+            }
+            if (procedureTypes.length > 0) {
+                const allowedLegacy = ['checkup', 'followup', 'consultation'];
+                const clinicOnly = procedureTypes.filter((t) => allowedServices.includes(t));
+                if (clinicOnly.length > 0) {
+                    booking.visitType = resolveLegacyVisitEnum(clinicOnly, followupServices);
+                    booking.procedureTypes = clinicOnly;
+                    booking.procedureType = procedureTypesToLegacyString(clinicOnly);
+                } else if (allowedLegacy.includes(procedureTypes[0])) {
+                    booking.visitType = procedureTypes[0];
+                    booking.procedureType = null;
+                    booking.procedureTypes = null;
+                }
+            } else {
+                booking.procedureType = null;
+                booking.procedureTypes = null;
+            }
         }
 
         // Update fields if provided
         if (name) booking.customerName = name;
         if (phone) booking.customerPhone = phone;
         if (amountPaid !== undefined) booking.amountPaid = amountPaid;
-        if (doctorId !== undefined) booking.doctorId = Number(doctorId);
-        if (visitType) {
-            if (CLINIC_PROCEDURE_TYPES.includes(visitType)) {
-                booking.visitType = visitType === 'إعادة' ? 'followup' : 'checkup';
-                booking.procedureType = visitType;
-            } else {
-                booking.visitType = visitType;
-                booking.procedureType = null;
+        if (req.body.paymentMethod !== undefined) {
+            const paymentValidation = validatePaymentMethod(req.body.paymentMethod, { required: true });
+            if (!paymentValidation.valid) {
+                return res.status(400).json({
+                    message: paymentValidation.message,
+                    allowedPaymentMethods: paymentValidation.allowedPaymentMethods || PAYMENT_METHODS,
+                    paymentMethodLabels: paymentValidation.labels || PAYMENT_METHOD_LABELS
+                });
             }
+            booking.paymentMethod = paymentValidation.value;
         }
+        if (doctorId !== undefined) booking.doctorId = Number(doctorId);
         if (req.body.age !== undefined) booking.age = req.body.age;
 
         // لو بيتحدد/بيتغير التاريخ → نتحقق من يوم العمل والطاقة الاستيعابية
@@ -646,7 +760,7 @@ exports.updateBooking = async (req, res, next) => {
 
         res.status(200).json({
             message: 'Booking updated successfully.',
-            booking
+            booking: enrichPaymentMethod(enrichBookingProcedures(booking.get({ plain: true })))
         });
     } catch (error) {
         next(error);
@@ -678,7 +792,7 @@ exports.cancelBooking = async (req, res, next) => {
     }
 };
 
-// Admin only: Update examination status (حالة الكشف) — waiting | done
+// Update examination status (حالة الكشف) — waiting | done (admin, secretary, doctor)
 exports.updateExaminationStatus = async (req, res, next) => {
     try {
         const { id } = req.params;

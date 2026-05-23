@@ -35,6 +35,11 @@ const Booking = sequelize.define('Booking', {
         defaultValue: 0.00,
         allowNull: true
     },
+    paymentMethod: {
+        type: DataTypes.ENUM('visa', 'cash', 'vodafone_cash', 'instapay'),
+        allowNull: true,
+        comment: 'طريقة الدفع: فيزا | نقدي | فودافون كاش | انستا باي'
+    },
     visitType: {
         type: DataTypes.ENUM('checkup', 'followup', 'consultation'),
         defaultValue: 'checkup',
@@ -44,13 +49,23 @@ const Booking = sequelize.define('Booking', {
     procedureType: {
         type: DataTypes.STRING(191),
         allowNull: true,
-        comment: 'نوع الزيارة التفصيلي الذي يراه المستخدم'
+        comment: 'نوع الزيارة التفصيلي الذي يراه المستخدم (أول خدمة أو ملخص نصي)'
+    },
+    procedureTypes: {
+        type: DataTypes.JSONB,
+        allowNull: true,
+        comment: 'قائمة الخدمات/الإجراءات المختارة للحجز'
+    },
+    clientRequestId: {
+        type: DataTypes.STRING(64),
+        allowNull: true,
+        comment: 'معرّف من الواجهة لمنع تكرار الطلب عند الضغط المزدوج'
     },
     status: {
         type: DataTypes.ENUM('pending', 'confirmed', 'cancelled', 'rejected'),
         defaultValue: 'pending'
     },
-    // حالة الكشف: في الانتظار (افتراضي) أو تم الكشف — يحدّثها الأدمن فقط
+    // حالة الكشف: في الانتظار (افتراضي) أو تم الكشف — يحدّثها الأدمن أو السكرتيرة أو الطبيب
     examinationStatus: {
         type: DataTypes.ENUM('waiting', 'done'),
         defaultValue: 'waiting',
@@ -92,6 +107,12 @@ const Booking = sequelize.define('Booking', {
         type: DataTypes.INTEGER,
         allowNull: true,
         comment: 'Admin/Secretary user id who assigned this booking'
+    },
+    isExtraBooking: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+        comment: 'حجز إضافي بعد امتلاء سعة اليوم'
     }
 }, {
     timestamps: true

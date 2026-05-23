@@ -32,21 +32,28 @@ async function doctorOwnBookingOrDailyPermission(req, res, next) {
 async function doctorOwnBookingForExamination(req, res, next) {
     if (req.user && req.user.role === 'admin') return next();
 
-    if (!(req.user && req.user.role === 'doctor')) {
-        return res.status(403).json({ message: 'Access denied. Doctor owner only.' });
+    if (req.user && ['secretary', 'staff'].includes(req.user.role)) {
+        return next();
     }
 
-    const doctorId = req.user.doctorProfile && req.user.doctorProfile.id;
-    if (!doctorId) {
-        return res.status(403).json({ message: 'Doctor profile not found for this account.' });
+    const permissions = req.user.permissions ? req.user.permissions.map(p => p.name) : [];
+    if (permissions.includes('manage_daily_bookings')) return next();
+
+    if (req.user && req.user.role === 'doctor') {
+        const doctorId = req.user.doctorProfile && req.user.doctorProfile.id;
+        if (!doctorId) {
+            return res.status(403).json({ message: 'Doctor profile not found for this account.' });
+        }
+
+        const booking = await Booking.findByPk(req.params.id, { attributes: ['id', 'doctorId'] });
+        if (!booking) return res.status(404).json({ message: 'Booking not found.' });
+        if (Number(booking.doctorId) !== Number(doctorId)) {
+            return res.status(403).json({ message: 'Access denied. This booking does not belong to this doctor.' });
+        }
+        return next();
     }
 
-    const booking = await Booking.findByPk(req.params.id, { attributes: ['id', 'doctorId'] });
-    if (!booking) return res.status(404).json({ message: 'Booking not found.' });
-    if (Number(booking.doctorId) !== Number(doctorId)) {
-        return res.status(403).json({ message: 'Access denied. This booking does not belong to this doctor.' });
-    }
-    return next();
+    return res.status(403).json({ message: 'Access denied. Requires admin, secretary, or manage_daily_bookings permission.' });
 }
 
 // Slot-based booking (working hours): public read slots, public create/cancel
@@ -89,7 +96,7 @@ router.get('/all', protect, (req, res, next) => {
     }
 }, bookingController.getAllBookings);
 
-// Examination status: booking owner doctor (or admin)
+// Examination status: admin, secretary/staff, or booking owner doctor
 router.patch('/:id/examination-status', protect, doctorOwnBookingForExamination, bookingController.updateExaminationStatus);
 
 // Patient reports: Admin or Doctor (doctor must own this booking)

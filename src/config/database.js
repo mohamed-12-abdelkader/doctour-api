@@ -169,6 +169,60 @@ const runMultiDoctorMigration = async () => {
 };
 
 // Migration: Expenses classification (categories + subcategories) tables + columns
+const runProcedureTypesMigration = async () => {
+  try {
+    await sequelize.query(`
+      ALTER TABLE "Bookings" ADD COLUMN IF NOT EXISTS "procedureTypes" JSONB;
+    `);
+    await sequelize.query(`
+      ALTER TABLE "Bookings" ADD COLUMN IF NOT EXISTS "clientRequestId" VARCHAR(64);
+    `);
+    await sequelize.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS "bookings_clinic_client_request_id_idx"
+      ON "Bookings" ("clientRequestId")
+      WHERE "clientRequestId" IS NOT NULL
+        AND "bookingType" = 'clinic'
+        AND "status" NOT IN ('cancelled', 'rejected');
+    `);
+    await sequelize.query(`
+      UPDATE "Bookings"
+      SET "procedureTypes" = jsonb_build_array("procedureType")
+      WHERE "procedureType" IS NOT NULL
+        AND ("procedureTypes" IS NULL OR "procedureTypes" = '[]'::jsonb);
+    `);
+    console.log('✅ procedureTypes + clientRequestId migration applied.');
+  } catch (err) {
+    console.warn('⚠️ procedureTypes migration skip:', err.message);
+  }
+};
+
+const runPaymentMethodMigration = async () => {
+  try {
+    await sequelize.query(`
+      DO $$ BEGIN
+        CREATE TYPE enum_Bookings_paymentMethod AS ENUM('visa', 'cash', 'vodafone_cash', 'instapay');
+      EXCEPTION
+        WHEN duplicate_object THEN null;
+      END $$;
+    `);
+    await sequelize.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'Bookings' AND column_name = 'paymentMethod'
+        ) THEN
+          ALTER TABLE "Bookings"
+          ADD COLUMN "paymentMethod" enum_Bookings_paymentMethod NULL;
+        END IF;
+      END $$;
+    `);
+    console.log('✅ paymentMethod migration applied.');
+  } catch (err) {
+    console.warn('⚠️ paymentMethod migration skip:', err.message);
+  }
+};
+
 const runExpensesClassificationMigration = async () => {
   try {
     // Create category/subcategory tables (idempotent)
@@ -266,6 +320,26 @@ const runExpensesClassificationMigration = async () => {
   }
 };
 
+const runExtraBookingMigration = async () => {
+  try {
+    await sequelize.query(`
+      ALTER TABLE "Bookings" ADD COLUMN IF NOT EXISTS "isExtraBooking" BOOLEAN NOT NULL DEFAULT false;
+    `);
+    console.log('✅ isExtraBooking migration applied.');
+  } catch (err) {
+    console.warn('⚠️ isExtraBooking migration skip:', err.message);
+  }
+};
+
+const runClinicServicesMigration = async () => {
+  try {
+    const { seedDefaultClinicServices } = require('../services/clinicServiceCatalog');
+    await seedDefaultClinicServices();
+  } catch (err) {
+    console.warn('⚠️ clinic services migration skip:', err.message);
+  }
+};
+
 const connectDB = async () => {
   try {
     await sequelize.authenticate();
@@ -275,11 +349,15 @@ const connectDB = async () => {
     await sequelize.sync({ alter: false });
     console.log('✅ Models synchronized.');
 
+    await runClinicServicesMigration();
+    await runExtraBookingMigration();
     await runExaminationStatusMigration();
     await runBookingAgeAndConsultationMigration();
     await runAppointmentDateNullableMigration();
     await runSlotBookingMigration();
     await runMultiDoctorMigration();
+    await runProcedureTypesMigration();
+    await runPaymentMethodMigration();
     await runExpensesClassificationMigration();
   } catch (error) {
     console.error('❌ Unable to connect to the database:', error);

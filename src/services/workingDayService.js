@@ -34,6 +34,9 @@ async function updateWorkingHours(id, payload) {
     return wd;
 }
 
+const DEFAULT_CLINIC_START_TIME = process.env.DEFAULT_CLINIC_START_TIME || '09:00';
+const DEFAULT_CLINIC_END_TIME = process.env.DEFAULT_CLINIC_END_TIME || '22:00';
+
 /**
  * Get working day for a specific date. Returns null if not set or inactive.
  */
@@ -41,7 +44,63 @@ async function getWorkingDayByDate(date, doctorId) {
     const wd = await WorkingDay.findOne({
         where: { date, doctorId, isActive: true }
     });
-    return wd;
+    if (wd) return wd;
+    if (doctorId != null) {
+        return WorkingDay.findOne({
+            where: { date, doctorId: null, isActive: true }
+        });
+    }
+    return null;
+}
+
+/**
+ * يوم عمل للحجز: يُستخدم الموجود، أو يُنشأ افتراضياً (09:00–22:00) إن لم يُضبط مسبقاً.
+ */
+async function getOrCreateWorkingDayForBooking(dateStr, doctorId, createdBy, transaction) {
+    const doctorIdNum = Number(doctorId);
+
+    let wd = await WorkingDay.findOne({
+        where: { date: dateStr, doctorId: doctorIdNum },
+        lock: transaction.LOCK.UPDATE,
+        transaction
+    });
+
+    if (wd) {
+        if (!wd.isActive) {
+            wd.isActive = true;
+            await wd.save({ transaction });
+        }
+        return { workingDay: wd, autoCreated: false };
+    }
+
+    wd = await WorkingDay.findOne({
+        where: { date: dateStr, doctorId: null, isActive: true },
+        lock: transaction.LOCK.UPDATE,
+        transaction
+    });
+    if (wd) {
+        return { workingDay: wd, autoCreated: false };
+    }
+
+    await WorkingDay.create(
+        {
+            date: dateStr,
+            startTime: DEFAULT_CLINIC_START_TIME,
+            endTime: DEFAULT_CLINIC_END_TIME,
+            doctorId: doctorIdNum,
+            isActive: true,
+            createdBy: createdBy || null
+        },
+        { transaction }
+    );
+
+    wd = await WorkingDay.findOne({
+        where: { date: dateStr, doctorId: doctorIdNum, isActive: true },
+        lock: transaction.LOCK.UPDATE,
+        transaction
+    });
+
+    return { workingDay: wd, autoCreated: true };
 }
 
 /**
@@ -67,5 +126,8 @@ module.exports = {
     setWorkingHours,
     updateWorkingHours,
     getWorkingDayByDate,
-    listWorkingDays
+    getOrCreateWorkingDayForBooking,
+    listWorkingDays,
+    DEFAULT_CLINIC_START_TIME,
+    DEFAULT_CLINIC_END_TIME
 };
