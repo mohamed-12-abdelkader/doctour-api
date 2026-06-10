@@ -40,6 +40,11 @@ const Booking = sequelize.define('Booking', {
         allowNull: true,
         comment: 'طريقة الدفع: فيزا | نقدي | فودافون كاش | انستا باي'
     },
+    paymentDetails: {
+        type: DataTypes.JSONB,
+        allowNull: true,
+        comment: 'تفاصيل الدفع المقسم: [{ method, amount }]'
+    },
     visitType: {
         type: DataTypes.ENUM('checkup', 'followup', 'consultation'),
         defaultValue: 'checkup',

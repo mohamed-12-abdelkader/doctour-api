@@ -96,6 +96,26 @@ router.get('/all', protect, (req, res, next) => {
     }
 }, bookingController.getAllBookings);
 
+// Protected Route: Get all registered cases grouped by patient phone
+router.get('/cases', protect, (req, res, next) => {
+    if (req.user && req.user.role === 'admin') {
+        return next();
+    }
+    if (req.user && req.user.role === 'doctor') {
+        return next();
+    }
+
+    const permissions = req.user.permissions || [];
+    const hasOnlinePermission = permissions.some(p => p.name === 'manage_online_bookings');
+    const hasDailyPermission = permissions.some(p => p.name === 'manage_daily_bookings');
+
+    if (hasOnlinePermission || hasDailyPermission) {
+        next();
+    } else {
+        return res.status(403).json({ message: 'Access denied. You need manage_online_bookings or manage_daily_bookings permission.' });
+    }
+}, bookingController.getAllCases);
+
 // Examination status: admin, secretary/staff, or booking owner doctor
 router.patch('/:id/examination-status', protect, doctorOwnBookingForExamination, bookingController.updateExaminationStatus);
 

@@ -217,6 +217,20 @@ const runPaymentMethodMigration = async () => {
         END IF;
       END $$;
     `);
+    await sequelize.query(`
+      ALTER TABLE "Bookings" ADD COLUMN IF NOT EXISTS "paymentDetails" JSONB;
+    `);
+    await sequelize.query(`
+      UPDATE "Bookings"
+      SET "paymentDetails" = jsonb_build_array(
+        jsonb_build_object(
+          'method', "paymentMethod"::text,
+          'amount', COALESCE("amountPaid", 0)
+        )
+      )
+      WHERE "paymentMethod" IS NOT NULL
+        AND ("paymentDetails" IS NULL OR "paymentDetails" = '[]'::jsonb);
+    `);
     console.log('✅ paymentMethod migration applied.');
   } catch (err) {
     console.warn('⚠️ paymentMethod migration skip:', err.message);

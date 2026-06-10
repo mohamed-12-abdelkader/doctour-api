@@ -14,6 +14,7 @@ const ExpenseCategory = require('./expenseCategory');
 const ExpenseSubcategory = require('./expenseSubcategory');
 const Notification = require('./Notification');
 const ClinicService = require('./clinicService');
+const BookingActivity = require('./bookingActivity');
 
 const UserPermission = sequelize.define('UserPermission', {
     userId: {
@@ -50,6 +51,13 @@ Patient.hasMany(Booking, { foreignKey: 'patientId' });
 Booking.belongsTo(Patient, { foreignKey: 'patientId' });
 Booking.belongsTo(DoctorProfile, { foreignKey: 'doctorId', as: 'doctor' });
 DoctorProfile.hasMany(Booking, { foreignKey: 'doctorId', as: 'bookings' });
+Booking.belongsTo(User, { foreignKey: 'assignedBy', as: 'assignedByUser' });
+User.hasMany(Booking, { foreignKey: 'assignedBy', as: 'assignedBookings' });
+
+Booking.hasMany(BookingActivity, { foreignKey: 'bookingId', as: 'activities' });
+BookingActivity.belongsTo(Booking, { foreignKey: 'bookingId' });
+BookingActivity.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasMany(BookingActivity, { foreignKey: 'userId', as: 'bookingActivities' });
 
 Booking.hasMany(PatientReport, { foreignKey: 'bookingId', as: 'reports' });
 PatientReport.belongsTo(Booking, { foreignKey: 'bookingId' });
@@ -78,5 +86,6 @@ module.exports = {
     ExpenseCategory,
     ExpenseSubcategory,
     Notification,
-    ClinicService
+    ClinicService,
+    BookingActivity
 };

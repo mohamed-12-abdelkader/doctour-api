@@ -1,4 +1,4 @@
-const { Booking, PatientReport, ReportMedication } = require('../models/index');
+const { Booking, PatientReport, ReportMedication, User, BookingActivity } = require('../models/index');
 const { Op } = require('sequelize');
 const workingDayService = require('../services/workingDayService');
 const bookingSlotService = require('../services/bookingSlotService');
@@ -10,14 +10,15 @@ const {
     validateProcedureTypes,
     resolveLegacyVisitEnum,
     procedureTypesToLegacyString,
-    enrichBookingProcedures
+    enrichBookingProcedures,
+    normalizePhone
 } = require('../utils/clinicProcedureHelper');
 const {
     getActiveServiceNames,
     getFollowupServiceNames
 } = require('../services/clinicServiceCatalog');
 const { createClinicBookingAtomic } = require('../services/clinicBookingService');
-const { validatePaymentMethod, enrichPaymentMethod } = require('../utils/paymentMethodHelper');
+const { validatePaymentPayload, enrichPaymentMethod } = require('../utils/paymentMethodHelper');
 const { PAYMENT_METHODS, PAYMENT_METHOD_LABELS } = require('../constants/paymentMethods');
 
 const reportWithMedicationsInclude = [
@@ -28,6 +29,88 @@ const reportWithMedicationsInclude = [
         include: [{ model: ReportMedication, as: 'medications', attributes: ['id', 'medicationName', 'dosage', 'frequency', 'notes'] }]
     }
 ];
+
+const BOOKING_ACTION_LABELS = {
+    created: 'إنشاء الحجز',
+    updated: 'تعديل الحجز',
+    cancelled: 'إلغاء الحجز',
+    status_changed: 'تغيير حالة الحجز',
+    examination_status_changed: 'تغيير حالة الكشف'
+};
+
+function publicUser(user) {
+    if (!user) return null;
+    return {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+    };
+}
+
+async function logBookingActivity(bookingId, user, action, metadata = null) {
+    if (!bookingId) return null;
+    return BookingActivity.create({
+        bookingId,
+        userId: user ? user.id : null,
+        action,
+        metadata
+    });
+}
+
+async function enrichBookingsWithAudit(bookings) {
+    const bookingIds = bookings.map((b) => b.id).filter(Boolean);
+    if (bookingIds.length === 0) return [];
+
+    const assignedByIds = [
+        ...new Set(bookings.map((b) => b.assignedBy).filter(Boolean))
+    ];
+
+    const [assignedUsers, activities] = await Promise.all([
+        assignedByIds.length > 0
+            ? User.findAll({
+                where: { id: { [Op.in]: assignedByIds } },
+                attributes: ['id', 'name', 'email', 'role']
+            })
+            : [],
+        BookingActivity.findAll({
+            where: { bookingId: { [Op.in]: bookingIds } },
+            include: [{ model: User, as: 'user', attributes: ['id', 'name', 'email', 'role'] }],
+            order: [['createdAt', 'ASC'], ['id', 'ASC']]
+        })
+    ]);
+
+    const usersById = new Map(assignedUsers.map((user) => [Number(user.id), publicUser(user)]));
+    const activitiesByBooking = new Map();
+    for (const activity of activities) {
+        const plain = activity.get({ plain: true });
+        const list = activitiesByBooking.get(plain.bookingId) || [];
+        list.push({
+            id: plain.id,
+            action: plain.action,
+            actionLabel: BOOKING_ACTION_LABELS[plain.action] || plain.action,
+            metadata: plain.metadata,
+            createdAt: plain.createdAt,
+            user: publicUser(plain.user)
+        });
+        activitiesByBooking.set(plain.bookingId, list);
+    }
+
+    return bookings.map((booking) => {
+        const plain = booking.get ? booking.get({ plain: true }) : booking;
+        return {
+            ...enrichPaymentMethod({
+                ...enrichBookingProcedures(plain),
+                appointmentTime: getBookingTimeStr(booking, true),
+                appointmentTime24: getBookingTimeStr(booking, false),
+                hasSpecificTime: !!plain.appointmentDate,
+                isExtraBooking: !!plain.isExtraBooking
+            }),
+            assignedByUser: usersById.get(Number(plain.assignedBy)) || null,
+            actions: activitiesByBooking.get(plain.id) || []
+        };
+    });
+}
 
 /** Get YYYY-MM-DD from booking (slotDate or appointmentDate) for real-time room. */
 function getBookingDateStr(booking) {
@@ -208,13 +291,47 @@ exports.createBooking = async (req, res, next) => {
             }
         }
 
-        // ─── نوع الكشف ────────────────────────────────────────────────
+        // ─── الخدمات المطلوبة / نوع الكشف ─────────────────────────────
         const visitTypeMap = { checkup: 'checkup', consultation: 'consultation', حجز: 'checkup', استشارة: 'consultation' };
-        const rawVisit = (visitType || 'checkup').toString().trim().toLowerCase();
-        const mappedVisit = visitTypeMap[rawVisit] || 'checkup';
-        if (!['checkup', 'consultation'].includes(mappedVisit)) {
+        const rawVisit = (visitType || 'checkup').toString().trim();
+        const mappedLegacyVisit = visitTypeMap[rawVisit.toLowerCase()];
+        const hasServicePayload =
+            req.body.visitTypes !== undefined ||
+            req.body.procedureTypes !== undefined ||
+            req.body.services !== undefined ||
+            (visitType !== undefined && !mappedLegacyVisit);
+
+        let mappedVisit = mappedLegacyVisit || 'checkup';
+        let procedureType = null;
+        let procedureTypes = null;
+
+        if (hasServicePayload) {
+            const requestedProcedureTypes = parseProcedureTypesFromBody(req.body);
+            const [allowedServices, followupServices] = await Promise.all([
+                getActiveServiceNames(),
+                getFollowupServiceNames()
+            ]);
+            const procedureValidation = validateProcedureTypes(requestedProcedureTypes, allowedServices);
+            if (!procedureValidation.valid) {
+                return res.status(400).json({
+                    message: procedureValidation.message,
+                    invalid: procedureValidation.invalid,
+                    allowedVisitTypes: procedureValidation.allowedVisitTypes
+                });
+            }
+
+            const allowedLegacy = ['checkup', 'followup', 'consultation'];
+            const clinicOnly = requestedProcedureTypes.filter((t) => allowedServices.includes(t));
+            if (clinicOnly.length > 0) {
+                mappedVisit = resolveLegacyVisitEnum(clinicOnly, followupServices);
+                procedureTypes = clinicOnly;
+                procedureType = procedureTypesToLegacyString(clinicOnly);
+            } else if (allowedLegacy.includes(requestedProcedureTypes[0])) {
+                mappedVisit = requestedProcedureTypes[0];
+            }
+        } else if (!['checkup', 'consultation'].includes(mappedVisit)) {
             return res.status(400).json({
-                message: 'نوع الكشف غير صحيح. استخدم: checkup أو consultation.'
+                message: 'نوع الكشف غير صحيح. استخدم: checkup أو consultation أو services لاختيار الخدمات.'
             });
         }
 
@@ -225,6 +342,8 @@ exports.createBooking = async (req, res, next) => {
             appointmentDate: null,   // يحدده الأدمن عند التأكيد
             bookingType: 'online',
             visitType: mappedVisit,
+            procedureType,
+            procedureTypes,
             status: 'pending',
             preferredDate: preferredDate || null,
             preferredTime: preferredTime || null
@@ -237,7 +356,7 @@ exports.createBooking = async (req, res, next) => {
 
         res.status(201).json({
             message: 'تم تقديم طلب الحجز بنجاح. سيتواصل معك الفريق لتأكيد الموعد. / Booking request submitted successfully.',
-            booking
+            booking: enrichBookingProcedures(booking.get({ plain: true }))
         });
     } catch (error) {
         next(error);
@@ -247,18 +366,19 @@ exports.createBooking = async (req, res, next) => {
 // Protected: Create a clinic booking (Admin/Staff with manage_daily_bookings)
 exports.createClinicBooking = async (req, res, next) => {
     try {
-        const { name, phone, date, amountPaid, doctorId, clientRequestId, age, paymentMethod } = req.body;
+        const { name, phone, date, doctorId, clientRequestId, age } = req.body;
 
         if (!name || !phone || !date || !doctorId) {
             return res.status(400).json({ message: 'Please provide name, phone, appointment date, and doctorId.' });
         }
 
-        const paymentValidation = validatePaymentMethod(paymentMethod, { required: true });
+        const paymentValidation = validatePaymentPayload(req.body, { required: true });
         if (!paymentValidation.valid) {
             return res.status(400).json({
                 message: paymentValidation.message,
                 allowedPaymentMethods: paymentValidation.allowedPaymentMethods || PAYMENT_METHODS,
-                paymentMethodLabels: paymentValidation.labels || PAYMENT_METHOD_LABELS
+                paymentMethodLabels: paymentValidation.labels || PAYMENT_METHOD_LABELS,
+                calculatedAmountPaid: paymentValidation.calculatedAmountPaid
             });
         }
 
@@ -325,8 +445,9 @@ exports.createClinicBooking = async (req, res, next) => {
                 phone,
                 appointmentDate,
                 slotDate,
-                amountPaid,
-                paymentMethod: paymentValidation.value,
+                amountPaid: paymentValidation.amountPaid,
+                paymentMethod: paymentValidation.paymentMethod,
+                paymentDetails: paymentValidation.paymentDetails,
                 visitType: legacyVisitEnum,
                 procedureType,
                 procedureTypes: procedureTypes.length > 0 ? procedureTypes : null,
@@ -364,6 +485,9 @@ exports.createClinicBooking = async (req, res, next) => {
         const plain = enrichPaymentMethod(enrichBookingProcedures(booking.get({ plain: true })));
 
         if (!duplicate) {
+            await logBookingActivity(booking.id, req.user, 'created', {
+                bookingType: 'clinic'
+            });
             emitBookingListChange(booking, 'created');
         }
 
@@ -422,7 +546,11 @@ exports.getOnlineBookings = async (req, res, next) => {
             order: [['appointmentDate', 'ASC'], ['id', 'ASC']]
         });
 
-        res.status(200).json(bookings);
+        const list = bookings.map((booking) => enrichPaymentMethod(
+            enrichBookingProcedures(booking.get({ plain: true }))
+        ));
+
+        res.status(200).json(list);
     } catch (error) {
         next(error);
     }
@@ -432,7 +560,7 @@ exports.getOnlineBookings = async (req, res, next) => {
 // Supports: ?date=YYYY-MM-DD | ?startDate=...&endDate=... | or combined
 exports.getAllBookings = async (req, res, next) => {
     try {
-        const { type, status, date, startDate, endDate, visitType, doctorId } = req.query;
+        const { type, status, date, startDate, endDate, visitType, doctorId, page, limit } = req.query;
         const whereClause = {};
         if (req.user.role === 'doctor') {
             const myDoctorId = req.user.doctorProfile && req.user.doctorProfile.id;
@@ -502,6 +630,7 @@ exports.getAllBookings = async (req, res, next) => {
             } else {
                 const apptFilter = {};
                 const slotFilter = {};
+                let hasRangeFilter = false;
 
                 if (startDate) {
                     const startStr = String(startDate).trim().slice(0, 10);
@@ -510,6 +639,7 @@ exports.getAllBookings = async (req, res, next) => {
                     }
                     apptFilter[Op.gte] = new Date(startStr + 'T00:00:00.000Z');
                     slotFilter[Op.gte] = startStr;
+                    hasRangeFilter = true;
                 }
 
                 if (endDate) {
@@ -519,38 +649,138 @@ exports.getAllBookings = async (req, res, next) => {
                     }
                     apptFilter[Op.lte] = new Date(endStr + 'T23:59:59.999Z');
                     slotFilter[Op.lte] = endStr;
+                    hasRangeFilter = true;
                 }
 
-                const dateBranches = [];
-                if (Object.keys(apptFilter).length > 0) {
-                    dateBranches.push({ appointmentDate: apptFilter });
-                }
-                if (Object.keys(slotFilter).length > 0) {
-                    dateBranches.push({ slotDate: slotFilter });
-                }
-                if (dateBranches.length > 0) {
-                    whereClause[Op.and].push({ [Op.or]: dateBranches });
+                if (hasRangeFilter) {
+                    whereClause[Op.and].push({
+                        [Op.or]: [
+                            { appointmentDate: apptFilter },
+                            { slotDate: slotFilter }
+                        ]
+                    });
                 }
             }
         }
 
+        const order = [['slotDate', 'ASC'], ['appointmentDate', 'ASC'], ['id', 'ASC']];
+        const pageNum = page !== undefined ? Math.max(parseInt(page, 10) || 1, 1) : null;
+        const limitNum = limit !== undefined ? Math.min(Math.max(parseInt(limit, 10) || 25, 1), 200) : null;
+        const queryOptions = {
+            where: whereClause,
+            order
+        };
+
+        let bookings;
+        let total;
+
+        if (pageNum && limitNum) {
+            const result = await Booking.findAndCountAll({
+                ...queryOptions,
+                limit: limitNum,
+                offset: (pageNum - 1) * limitNum
+            });
+            bookings = result.rows;
+            total = result.count;
+        } else {
+            bookings = await Booking.findAll(queryOptions);
+            total = bookings.length;
+        }
+
+        const list = await enrichBookingsWithAudit(bookings);
+
+        const response = { total, bookings: list };
+        if (pageNum && limitNum) {
+            response.page = pageNum;
+            response.limit = limitNum;
+            response.totalPages = Math.ceil(total / limitNum);
+        }
+
+        res.status(200).json(response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// Protected: Get all registered cases grouped by patient phone
+exports.getAllCases = async (req, res, next) => {
+    try {
+        const { page, limit, search, doctorId } = req.query;
+        const whereClause = {};
+
+        if (req.user.role === 'doctor') {
+            const myDoctorId = req.user.doctorProfile && req.user.doctorProfile.id;
+            if (!myDoctorId) return res.status(403).json({ message: 'Doctor profile not found for this account.' });
+            whereClause.doctorId = myDoctorId;
+        } else if (doctorId) {
+            whereClause.doctorId = Number(doctorId);
+        }
+
+        if (search && String(search).trim()) {
+            const term = `%${String(search).trim()}%`;
+            whereClause[Op.or] = [
+                { customerName: { [Op.iLike]: term } },
+                { customerPhone: { [Op.iLike]: term } }
+            ];
+        }
+
         const bookings = await Booking.findAll({
             where: whereClause,
-            order: [['slotDate', 'ASC'], ['appointmentDate', 'ASC'], ['id', 'ASC']]
+            order: [['createdAt', 'DESC'], ['id', 'DESC']]
         });
 
-        const list = bookings.map(b => {
-            const plain = b.get ? b.get({ plain: true }) : b;
-            return enrichPaymentMethod({
+        const casesByPhone = new Map();
+        for (const booking of bookings) {
+            const plain = booking.get({ plain: true });
+            const phoneKey = normalizePhone(plain.customerPhone) || String(plain.customerPhone || '').trim();
+            if (!phoneKey) continue;
+
+            const enrichedBooking = enrichPaymentMethod({
                 ...enrichBookingProcedures(plain),
-                appointmentTime: getBookingTimeStr(b, true),
-                appointmentTime24: getBookingTimeStr(b, false),
-                hasSpecificTime: !!b.appointmentDate,
+                appointmentTime: getBookingTimeStr(booking, true),
+                appointmentTime24: getBookingTimeStr(booking, false),
+                hasSpecificTime: !!plain.appointmentDate,
                 isExtraBooking: !!plain.isExtraBooking
             });
-        });
 
-        res.status(200).json({ total: list.length, bookings: list });
+            if (!casesByPhone.has(phoneKey)) {
+                casesByPhone.set(phoneKey, {
+                    name: plain.customerName,
+                    phone: plain.customerPhone,
+                    normalizedPhone: phoneKey,
+                    totalBookings: 0,
+                    statusCounts: {},
+                    bookingTypeCounts: {},
+                    firstRegisteredAt: plain.createdAt,
+                    lastRegisteredAt: plain.createdAt,
+                    lastBookingDate: getBookingDateStr(plain),
+                    lastBooking: enrichedBooking
+                });
+            }
+
+            const patientCase = casesByPhone.get(phoneKey);
+            patientCase.totalBookings += 1;
+            patientCase.statusCounts[plain.status] = (patientCase.statusCounts[plain.status] || 0) + 1;
+            patientCase.bookingTypeCounts[plain.bookingType] = (patientCase.bookingTypeCounts[plain.bookingType] || 0) + 1;
+            patientCase.firstRegisteredAt = plain.createdAt;
+        }
+
+        const allCases = [...casesByPhone.values()];
+        const pageNum = page !== undefined ? Math.max(parseInt(page, 10) || 1, 1) : null;
+        const limitNum = limit !== undefined ? Math.min(Math.max(parseInt(limit, 10) || 25, 1), 200) : null;
+        const total = allCases.length;
+        const cases = pageNum && limitNum
+            ? allCases.slice((pageNum - 1) * limitNum, pageNum * limitNum)
+            : allCases;
+
+        const response = { total, cases };
+        if (pageNum && limitNum) {
+            response.page = pageNum;
+            response.limit = limitNum;
+            response.totalPages = Math.ceil(total / limitNum);
+        }
+
+        res.status(200).json(response);
     } catch (error) {
         next(error);
     }
@@ -623,8 +853,15 @@ exports.updateBookingStatus = async (req, res, next) => {
             booking.assignedBy = req.user.id;
         }
 
+        const previousStatus = booking.status;
         booking.status = status;
         await booking.save();
+
+        await logBookingActivity(booking.id, req.user, 'status_changed', {
+            from: previousStatus,
+            to: status,
+            bookingType: booking.bookingType
+        });
 
         emitBookingListChange(booking, 'statusChanged');
 
@@ -633,7 +870,10 @@ exports.updateBookingStatus = async (req, res, next) => {
             console.error('⚠️  Notification failed (non-blocking):', err.message)
         );
 
-        const responsePayload = { message: `Booking ${status} successfully.`, booking };
+        const responsePayload = {
+            message: `Booking ${status} successfully.`,
+            booking: enrichPaymentMethod(enrichBookingProcedures(booking.get({ plain: true })))
+        };
 
         if (status === 'confirmed' && booking.bookingType === 'online' && getBookingDateStr(booking)) {
             const expected = await getExpectedExaminationTime(booking);
@@ -706,17 +946,39 @@ exports.updateBooking = async (req, res, next) => {
         // Update fields if provided
         if (name) booking.customerName = name;
         if (phone) booking.customerPhone = phone;
-        if (amountPaid !== undefined) booking.amountPaid = amountPaid;
-        if (req.body.paymentMethod !== undefined) {
-            const paymentValidation = validatePaymentMethod(req.body.paymentMethod, { required: true });
+        const hasPaymentPayload =
+            req.body.amountPaid !== undefined ||
+            req.body.paymentMethod !== undefined ||
+            req.body.paymentDetails !== undefined ||
+            req.body.payments !== undefined ||
+            req.body.paymentMethods !== undefined;
+
+        if (hasPaymentPayload) {
+            const hasSplitPaymentPayload =
+                req.body.paymentDetails !== undefined ||
+                req.body.payments !== undefined ||
+                req.body.paymentMethods !== undefined;
+            const paymentValidation = validatePaymentPayload(
+                {
+                    ...req.body,
+                    amountPaid: req.body.amountPaid !== undefined
+                        ? req.body.amountPaid
+                        : (hasSplitPaymentPayload ? undefined : booking.amountPaid),
+                    paymentMethod: req.body.paymentMethod !== undefined ? req.body.paymentMethod : booking.paymentMethod
+                },
+                { required: true }
+            );
             if (!paymentValidation.valid) {
                 return res.status(400).json({
                     message: paymentValidation.message,
                     allowedPaymentMethods: paymentValidation.allowedPaymentMethods || PAYMENT_METHODS,
-                    paymentMethodLabels: paymentValidation.labels || PAYMENT_METHOD_LABELS
+                    paymentMethodLabels: paymentValidation.labels || PAYMENT_METHOD_LABELS,
+                    calculatedAmountPaid: paymentValidation.calculatedAmountPaid
                 });
             }
-            booking.paymentMethod = paymentValidation.value;
+            booking.amountPaid = paymentValidation.amountPaid;
+            booking.paymentMethod = paymentValidation.paymentMethod;
+            booking.paymentDetails = paymentValidation.paymentDetails;
         }
         if (doctorId !== undefined) booking.doctorId = Number(doctorId);
         if (req.body.age !== undefined) booking.age = req.body.age;
@@ -754,7 +1016,14 @@ exports.updateBooking = async (req, res, next) => {
             booking.appointmentDate = date;
         }
 
+        const changedFields = booking.changed() || [];
         await booking.save();
+
+        if (changedFields.length > 0) {
+            await logBookingActivity(booking.id, req.user, 'updated', {
+                fields: changedFields
+            });
+        }
 
         emitBookingListChange(booking, 'updated', prevDateStr);
 
@@ -778,14 +1047,20 @@ exports.cancelBooking = async (req, res, next) => {
             return res.status(404).json({ message: 'Booking not found.' });
         }
 
+        const previousStatus = booking.status;
         booking.status = 'cancelled';
         await booking.save();
+
+        await logBookingActivity(booking.id, req.user, 'cancelled', {
+            from: previousStatus,
+            to: 'cancelled'
+        });
 
         emitBookingListChange(booking, 'cancelled');
 
         res.status(200).json({
             message: 'Booking cancelled successfully.',
-            booking
+            booking: enrichPaymentMethod(enrichBookingProcedures(booking.get({ plain: true })))
         });
     } catch (error) {
         next(error);
@@ -817,15 +1092,21 @@ exports.updateExaminationStatus = async (req, res, next) => {
             return res.status(404).json({ message: 'Booking not found.' });
         }
 
+        const previousExaminationStatus = booking.examinationStatus;
         booking.examinationStatus = value;
         await booking.save();
         await booking.reload();
+
+        await logBookingActivity(booking.id, req.user, 'examination_status_changed', {
+            from: previousExaminationStatus,
+            to: value
+        });
 
         emitBookingListChange(booking, 'examinationStatus');
 
         res.status(200).json({
             message: value === 'done' ? 'Examination marked as done (تم الكشف).' : 'Examination status set to waiting (في الانتظار).',
-            booking
+            booking: enrichPaymentMethod(enrichBookingProcedures(booking.get({ plain: true })))
         });
     } catch (error) {
         if (error.name === 'SequelizeDatabaseError' && error.message && error.message.includes('examinationStatus')) {
@@ -881,8 +1162,15 @@ exports.getBookingWithHistory = async (req, res, next) => {
 
         const lastVisit = pastBookings.length > 0 ? pastBookings[0] : null;
 
+        const enrichedCurrentBooking = enrichPaymentMethod(
+            enrichBookingProcedures(currentBooking.get({ plain: true }))
+        );
+        const enrichedPastBookings = pastBookings.map((booking) => enrichPaymentMethod(
+            enrichBookingProcedures(booking.get({ plain: true }))
+        ));
+
         res.status(200).json({
-            currentBooking,
+            currentBooking: enrichedCurrentBooking,
             patientHistory: {
                 totalPastVisits: totalVisits,
                 totalAmountPaid: totalPaid.toFixed(2),
@@ -892,7 +1180,7 @@ exports.getBookingWithHistory = async (req, res, next) => {
                     amountPaid: lastVisit.amountPaid,
                     status: lastVisit.status
                 } : null,
-                pastBookings
+                pastBookings: enrichedPastBookings
             }
         });
     } catch (error) {
