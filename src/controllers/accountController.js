@@ -1,6 +1,7 @@
 const { Booking, IncomeEntry, Expense, ExpenseCategory, ExpenseSubcategory, DoctorProfile, User } = require('../models/index');
 const { Op } = require('sequelize');
 const sequelize = require('sequelize');
+const financialReportService = require('../services/financialReportService');
 
 /**
  * مجموع amountPaid للحجوزات في الفترة، مجمّع حسب doctorId، مع أسماء الأطباء.
@@ -465,6 +466,60 @@ exports.getSummary = async (req, res, next) => {
             note:
                 'الدخل اليدوي والمصروفات على مستوى العيادة (غير موزعة على الأطباء). دخل الحجوزات موزّع في incomeFromBookingsByDoctor.'
         });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// GET /api/accounts/financial-report — ملخص مالي احترافي + cards + charts + validation
+exports.getFinancialReport = async (req, res, next) => {
+    try {
+        const report = await financialReportService.getFinancialReport(req.query);
+        res.status(200).json(report);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// GET /api/accounts/financial-report/cases — جدول الحالات مع بحث وفلاتر و pagination
+exports.getFinancialReportCases = async (req, res, next) => {
+    try {
+        const result = await financialReportService.getFinancialCases(req.query);
+        res.status(200).json(result);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// GET /api/accounts/financial-report/export?format=excel|pdf|print
+exports.exportFinancialReport = async (req, res, next) => {
+    try {
+        const format = String(req.query.format || 'excel').trim().toLowerCase();
+        const timestamp = new Date().toISOString().slice(0, 10);
+
+        if (format === 'excel' || format === 'xlsx') {
+            const workbook = await financialReportService.buildExcelReport(req.query);
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', `attachment; filename="financial-report-${timestamp}.xlsx"`);
+            await workbook.xlsx.write(res);
+            return res.end();
+        }
+
+        if (format === 'pdf') {
+            const doc = await financialReportService.buildPdfReport(req.query);
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="financial-report-${timestamp}.pdf"`);
+            doc.pipe(res);
+            return;
+        }
+
+        if (format === 'print' || format === 'html') {
+            const html = await financialReportService.buildPrintableHtml(req.query);
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.status(200).send(html);
+        }
+
+        return res.status(400).json({ message: 'Invalid export format. Use excel, pdf, or print.' });
     } catch (error) {
         next(error);
     }

@@ -21,6 +21,43 @@ const { createClinicBookingAtomic } = require('../services/clinicBookingService'
 const { validatePaymentPayload, enrichPaymentMethod } = require('../utils/paymentMethodHelper');
 const { PAYMENT_METHODS, PAYMENT_METHOD_LABELS } = require('../constants/paymentMethods');
 
+const TOTAL_AMOUNT_FIELDS = ['totalAmount', 'bookingValue', 'requiredAmount', 'amountDue', 'price', 'value'];
+
+function toMoney(raw) {
+    if (raw === undefined || raw === null || raw === '') return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Math.round(value * 100) / 100 : NaN;
+}
+
+function getRequestedTotalAmount(body) {
+    for (const field of TOTAL_AMOUNT_FIELDS) {
+        if (body[field] !== undefined) return toMoney(body[field]);
+    }
+    return null;
+}
+
+function resolveTotalAmount(body, paidAmount, currentTotalAmount = null) {
+    const requestedTotal = getRequestedTotalAmount(body);
+    if (Number.isNaN(requestedTotal) || requestedTotal < 0) {
+        return { valid: false, message: 'totalAmount must be a valid positive number.' };
+    }
+
+    const currentTotal = toMoney(currentTotalAmount);
+    const totalAmount = requestedTotal !== null
+        ? requestedTotal
+        : (currentTotal !== null && Number.isFinite(currentTotal) ? currentTotal : paidAmount);
+
+    if (Number.isFinite(totalAmount) && Number.isFinite(paidAmount) && paidAmount - totalAmount > 0.009) {
+        return {
+            valid: false,
+            message: 'amountPaid cannot be greater than totalAmount.',
+            calculatedRemainingAmount: Math.round((totalAmount - paidAmount) * 100) / 100
+        };
+    }
+
+    return { valid: true, totalAmount };
+}
+
 const reportWithMedicationsInclude = [
     {
         model: PatientReport,
@@ -341,6 +378,8 @@ exports.createBooking = async (req, res, next) => {
             customerPhone: normalizedPhone,
             appointmentDate: null,   // يحدده الأدمن عند التأكيد
             bookingType: 'online',
+            totalAmount: 0,
+            amountPaid: 0,
             visitType: mappedVisit,
             procedureType,
             procedureTypes,
@@ -379,6 +418,14 @@ exports.createClinicBooking = async (req, res, next) => {
                 allowedPaymentMethods: paymentValidation.allowedPaymentMethods || PAYMENT_METHODS,
                 paymentMethodLabels: paymentValidation.labels || PAYMENT_METHOD_LABELS,
                 calculatedAmountPaid: paymentValidation.calculatedAmountPaid
+            });
+        }
+
+        const totalValidation = resolveTotalAmount(req.body, paymentValidation.amountPaid);
+        if (!totalValidation.valid) {
+            return res.status(400).json({
+                message: totalValidation.message,
+                calculatedRemainingAmount: totalValidation.calculatedRemainingAmount
             });
         }
 
@@ -445,6 +492,7 @@ exports.createClinicBooking = async (req, res, next) => {
                 phone,
                 appointmentDate,
                 slotDate,
+                totalAmount: totalValidation.totalAmount,
                 amountPaid: paymentValidation.amountPaid,
                 paymentMethod: paymentValidation.paymentMethod,
                 paymentDetails: paymentValidation.paymentDetails,
@@ -952,6 +1000,7 @@ exports.updateBooking = async (req, res, next) => {
             req.body.paymentDetails !== undefined ||
             req.body.payments !== undefined ||
             req.body.paymentMethods !== undefined;
+        const hasTotalAmountPayload = TOTAL_AMOUNT_FIELDS.some((field) => req.body[field] !== undefined);
 
         if (hasPaymentPayload) {
             const hasSplitPaymentPayload =
@@ -979,6 +1028,16 @@ exports.updateBooking = async (req, res, next) => {
             booking.amountPaid = paymentValidation.amountPaid;
             booking.paymentMethod = paymentValidation.paymentMethod;
             booking.paymentDetails = paymentValidation.paymentDetails;
+        }
+        if (hasPaymentPayload || hasTotalAmountPayload) {
+            const totalValidation = resolveTotalAmount(req.body, Number(booking.amountPaid || 0), booking.totalAmount);
+            if (!totalValidation.valid) {
+                return res.status(400).json({
+                    message: totalValidation.message,
+                    calculatedRemainingAmount: totalValidation.calculatedRemainingAmount
+                });
+            }
+            booking.totalAmount = totalValidation.totalAmount;
         }
         if (doctorId !== undefined) booking.doctorId = Number(doctorId);
         if (req.body.age !== undefined) booking.age = req.body.age;

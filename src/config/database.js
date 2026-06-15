@@ -366,6 +366,32 @@ const runClinicServicesMigration = async () => {
   }
 };
 
+const runFinancialReportingMigration = async () => {
+  try {
+    await sequelize.query(`
+      ALTER TABLE "Bookings" ADD COLUMN IF NOT EXISTS "totalAmount" DECIMAL(12, 2);
+    `);
+    await sequelize.query(`
+      UPDATE "Bookings"
+      SET "totalAmount" = COALESCE("amountPaid", 0)
+      WHERE "totalAmount" IS NULL;
+    `);
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS "bookings_financial_date_idx"
+      ON "Bookings" (COALESCE("slotDate", ("appointmentDate")::date, ("createdAt")::date));
+    `).catch(() => { });
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS "bookings_financial_status_idx"
+      ON "Bookings" ("status");
+    `).catch(() => { });
+    console.log('✅ Financial reporting migration applied.');
+  } catch (err) {
+    console.warn('⚠️ Financial reporting migration skip:', err.message);
+  }
+};
+
+const shouldRunStartupMigrations = () => process.env.SKIP_STARTUP_MIGRATIONS !== 'true';
+
 const connectDB = async () => {
   try {
     await sequelize.authenticate();
@@ -374,6 +400,13 @@ const connectDB = async () => {
     // Sync models - create tables if they don't exist (WorkingDay, Patient, etc.)
     await sequelize.sync({ alter: false });
     console.log('✅ Models synchronized.');
+
+    await runFinancialReportingMigration();
+
+    if (!shouldRunStartupMigrations()) {
+      console.log('ℹ️ Startup migrations skipped for faster dev startup.');
+      return;
+    }
 
     await runClinicServicesMigration();
     await runExtraBookingMigration();

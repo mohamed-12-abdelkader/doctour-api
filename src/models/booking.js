@@ -35,6 +35,11 @@ const Booking = sequelize.define('Booking', {
         defaultValue: 0.00,
         allowNull: true
     },
+    totalAmount: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: true,
+        comment: 'إجمالي قيمة الحجز المستحقة قبل خصم المدفوع'
+    },
     paymentMethod: {
         type: DataTypes.ENUM('visa', 'cash', 'vodafone_cash', 'instapay'),
         allowNull: true,

@@ -21,9 +21,10 @@ const seedPermissions = async () => {
         'manage_accounts'
     ];
 
-    for (const name of defaultPermissions) {
-        await Permission.findOrCreate({ where: { name } });
-    }
+    await Permission.bulkCreate(
+        defaultPermissions.map((name) => ({ name })),
+        { ignoreDuplicates: true }
+    );
     console.log('✅ Default permissions seeded.');
 };
 

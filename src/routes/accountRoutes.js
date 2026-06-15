@@ -40,6 +40,14 @@ router.post('/expense-subcategories', accountsAccess, accountController.addExpen
 router.put('/expense-subcategories/:id', accountsAccess, accountController.updateExpenseSubcategory);
 router.delete('/expense-subcategories/:id', accountsAccess, accountController.deleteExpenseSubcategory);
 
+// ——— النظام المالي الاحترافي
+// GET .../financial-report?date=YYYY-MM-DD | ?period=week&date=YYYY-MM-DD | ?month=YYYY-MM | ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+router.get('/financial-report', accountsAccess, accountController.getFinancialReport);
+// GET .../financial-report/cases?paymentStatus=paid|unpaid|partial|outstanding|all&search=...&page=1&limit=25
+router.get('/financial-report/cases', accountsAccess, accountController.getFinancialReportCases);
+// GET .../financial-report/export?format=excel|pdf|print + نفس فلاتر الفترة
+router.get('/financial-report/export', accountsAccess, accountController.exportFinancialReport);
+
 // ——— ملخص الحسابات (دخل + مصروفات + رصيد)
 // GET .../summary — نفس خيارات الفترة
 router.get('/summary', accountsAccess, accountController.getSummary);

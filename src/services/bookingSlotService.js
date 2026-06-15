@@ -191,7 +191,9 @@ async function createSlotBooking(patientId, dateStr, timeSlot, bookingType, doct
         timeSlot,
         bookingType: bookingType === 'clinic' ? 'clinic' : 'online',
         status: 'confirmed',
-        appointmentDate: new Date(dateStr + 'T12:00:00.000Z')
+        appointmentDate: new Date(dateStr + 'T12:00:00.000Z'),
+        totalAmount: 0,
+        amountPaid: 0
     });
 
     return { success: true, booking };
