@@ -36,18 +36,34 @@ function getRequestedTotalAmount(body) {
     return null;
 }
 
-function resolveTotalAmount(body, paidAmount, currentTotalAmount = null) {
+function getExplicitTotalAmounts(body) {
+    return TOTAL_AMOUNT_FIELDS
+        .filter((field) => body[field] !== undefined)
+        .map((field) => toMoney(body[field]))
+        .filter((value) => value !== null && Number.isFinite(value));
+}
+
+function resolveTotalAmount(body, paidAmount, currentTotalAmount = null, { forUpdate = false } = {}) {
+    const explicitTotals = getExplicitTotalAmounts(body);
     const requestedTotal = getRequestedTotalAmount(body);
-    if (Number.isNaN(requestedTotal) || requestedTotal < 0) {
+
+    if (explicitTotals.some((value) => Number.isNaN(value) || value < 0)) {
         return { valid: false, message: 'totalAmount must be a valid positive number.' };
     }
 
     const currentTotal = toMoney(currentTotalAmount);
-    const totalAmount = requestedTotal !== null
-        ? requestedTotal
-        : (currentTotal !== null && Number.isFinite(currentTotal) ? currentTotal : paidAmount);
+    let totalAmount;
 
-    if (Number.isFinite(totalAmount) && Number.isFinite(paidAmount) && paidAmount - totalAmount > 0.009) {
+    if (forUpdate && explicitTotals.length > 0) {
+        // الواجهة قد ترسل أكثر من حقل سعر؛ نأخذ الأعلى لتجنب رفض زيادة السعر بسبب قيمة قديمة.
+        totalAmount = Math.max(...explicitTotals);
+    } else if (requestedTotal !== null) {
+        totalAmount = requestedTotal;
+    } else {
+        totalAmount = currentTotal !== null && Number.isFinite(currentTotal) ? currentTotal : paidAmount;
+    }
+
+    if (!forUpdate && Number.isFinite(totalAmount) && Number.isFinite(paidAmount) && paidAmount - totalAmount > 0.009) {
         return {
             valid: false,
             message: 'amountPaid cannot be greater than totalAmount.',
@@ -1030,7 +1046,12 @@ exports.updateBooking = async (req, res, next) => {
             booking.paymentDetails = paymentValidation.paymentDetails;
         }
         if (hasPaymentPayload || hasTotalAmountPayload) {
-            const totalValidation = resolveTotalAmount(req.body, Number(booking.amountPaid || 0), booking.totalAmount);
+            const totalValidation = resolveTotalAmount(
+                req.body,
+                Number(booking.amountPaid || 0),
+                booking.totalAmount,
+                { forUpdate: true }
+            );
             if (!totalValidation.valid) {
                 return res.status(400).json({
                     message: totalValidation.message,
