@@ -7,6 +7,9 @@ const { emitBookingListChange } = require('../socket');
 const { parseTimeToMinutes, minutesToTimeStr, SLOT_DURATION_MINUTES, normalizeTimeSlot } = require('../utils/slotHelper');
 const {
     parseProcedureTypesFromBody,
+    parseServiceItemsFromBody,
+    sumServicePrices,
+    serviceItemsToStorage,
     validateProcedureTypes,
     resolveLegacyVisitEnum,
     procedureTypesToLegacyString,
@@ -72,6 +75,37 @@ function resolveTotalAmount(body, paidAmount, currentTotalAmount = null, { forUp
     }
 
     return { valid: true, totalAmount };
+}
+
+function resolveBookingServices(body) {
+    const serviceItems = parseServiceItemsFromBody(body);
+    if (serviceItems.valid === false) {
+        return serviceItems;
+    }
+    return {
+        valid: true,
+        serviceItems,
+        procedureTypes: serviceItems.map((item) => item.name),
+        procedureTypesStorage: serviceItemsToStorage(serviceItems),
+        servicesTotal: sumServicePrices(serviceItems)
+    };
+}
+
+function resolveBookingTotalAmount(body, paidAmount, currentTotalAmount = null, servicesTotal = 0, { forUpdate = false } = {}) {
+    const explicitTotal = getRequestedTotalAmount(body);
+    const totalValidation = resolveTotalAmount(body, paidAmount, currentTotalAmount, { forUpdate });
+
+    if (!totalValidation.valid) return totalValidation;
+
+    if (servicesTotal > 0 && explicitTotal === null) {
+        return { valid: true, totalAmount: servicesTotal };
+    }
+
+    if (servicesTotal > 0 && explicitTotal !== null && forUpdate) {
+        return { valid: true, totalAmount: Math.max(explicitTotal, servicesTotal) };
+    }
+
+    return totalValidation;
 }
 
 const reportWithMedicationsInclude = [
@@ -352,6 +386,7 @@ exports.createBooking = async (req, res, next) => {
             req.body.visitTypes !== undefined ||
             req.body.procedureTypes !== undefined ||
             req.body.services !== undefined ||
+            req.body.serviceItems !== undefined ||
             (visitType !== undefined && !mappedLegacyVisit);
 
         let mappedVisit = mappedLegacyVisit || 'checkup';
@@ -359,12 +394,16 @@ exports.createBooking = async (req, res, next) => {
         let procedureTypes = null;
 
         if (hasServicePayload) {
-            const requestedProcedureTypes = parseProcedureTypesFromBody(req.body);
+            const servicesResult = resolveBookingServices(req.body);
+            if (!servicesResult.valid) {
+                return res.status(400).json({ message: servicesResult.message });
+            }
+
             const [allowedServices, followupServices] = await Promise.all([
                 getActiveServiceNames(),
                 getFollowupServiceNames()
             ]);
-            const procedureValidation = validateProcedureTypes(requestedProcedureTypes, allowedServices);
+            const procedureValidation = validateProcedureTypes(servicesResult.procedureTypes, allowedServices);
             if (!procedureValidation.valid) {
                 return res.status(400).json({
                     message: procedureValidation.message,
@@ -374,13 +413,13 @@ exports.createBooking = async (req, res, next) => {
             }
 
             const allowedLegacy = ['checkup', 'followup', 'consultation'];
-            const clinicOnly = requestedProcedureTypes.filter((t) => allowedServices.includes(t));
+            const clinicOnly = servicesResult.procedureTypes.filter((t) => allowedServices.includes(t));
             if (clinicOnly.length > 0) {
                 mappedVisit = resolveLegacyVisitEnum(clinicOnly, followupServices);
-                procedureTypes = clinicOnly;
+                procedureTypes = servicesResult.procedureTypesStorage;
                 procedureType = procedureTypesToLegacyString(clinicOnly);
-            } else if (allowedLegacy.includes(requestedProcedureTypes[0])) {
-                mappedVisit = requestedProcedureTypes[0];
+            } else if (allowedLegacy.includes(servicesResult.procedureTypes[0])) {
+                mappedVisit = servicesResult.procedureTypes[0];
             }
         } else if (!['checkup', 'consultation'].includes(mappedVisit)) {
             return res.status(400).json({
@@ -437,25 +476,34 @@ exports.createClinicBooking = async (req, res, next) => {
             });
         }
 
-        const totalValidation = resolveTotalAmount(req.body, paymentValidation.amountPaid);
-        if (!totalValidation.valid) {
-            return res.status(400).json({
-                message: totalValidation.message,
-                calculatedRemainingAmount: totalValidation.calculatedRemainingAmount
-            });
+        const servicesResult = resolveBookingServices(req.body);
+        if (!servicesResult.valid) {
+            return res.status(400).json({ message: servicesResult.message });
         }
 
-        const procedureTypes = parseProcedureTypesFromBody(req.body);
         const [allowedServices, followupServices] = await Promise.all([
             getActiveServiceNames(),
             getFollowupServiceNames()
         ]);
-        const procedureValidation = validateProcedureTypes(procedureTypes, allowedServices);
+        const procedureValidation = validateProcedureTypes(servicesResult.procedureTypes, allowedServices);
         if (!procedureValidation.valid) {
             return res.status(400).json({
                 message: procedureValidation.message,
                 invalid: procedureValidation.invalid,
                 allowedVisitTypes: procedureValidation.allowedVisitTypes
+            });
+        }
+
+        const totalValidation = resolveBookingTotalAmount(
+            req.body,
+            paymentValidation.amountPaid,
+            null,
+            servicesResult.servicesTotal
+        );
+        if (!totalValidation.valid) {
+            return res.status(400).json({
+                message: totalValidation.message,
+                calculatedRemainingAmount: totalValidation.calculatedRemainingAmount
             });
         }
 
@@ -496,8 +544,9 @@ exports.createClinicBooking = async (req, res, next) => {
             appointmentDate = new Date(date);
         }
 
-        const legacyVisitEnum = resolveLegacyVisitEnum(procedureTypes, followupServices);
-        const procedureType = procedureTypesToLegacyString(procedureTypes);
+        const legacyVisitEnum = resolveLegacyVisitEnum(servicesResult.procedureTypes, followupServices);
+        const procedureType = procedureTypesToLegacyString(servicesResult.procedureTypes);
+        const procedureTypes = servicesResult.procedureTypesStorage;
 
         let result;
         try {
@@ -514,7 +563,7 @@ exports.createClinicBooking = async (req, res, next) => {
                 paymentDetails: paymentValidation.paymentDetails,
                 visitType: legacyVisitEnum,
                 procedureType,
-                procedureTypes: procedureTypes.length > 0 ? procedureTypes : null,
+                procedureTypes: procedureTypes && procedureTypes.length > 0 ? procedureTypes : null,
                 assignedBy: req.user.id,
                 age,
                 clientRequestId,
@@ -968,20 +1017,26 @@ exports.updateBooking = async (req, res, next) => {
         }
 
         const prevDateStr = getBookingDateStr(booking);
+        let servicesTotalForUpdate = null;
 
         const hasProcedurePayload =
             req.body.visitTypes !== undefined ||
             req.body.procedureTypes !== undefined ||
             req.body.services !== undefined ||
+            req.body.serviceItems !== undefined ||
             visitType !== undefined;
 
         if (hasProcedurePayload) {
-            const procedureTypes = parseProcedureTypesFromBody(req.body);
+            const servicesResult = resolveBookingServices(req.body);
+            if (!servicesResult.valid) {
+                return res.status(400).json({ message: servicesResult.message });
+            }
+
             const [allowedServices, followupServices] = await Promise.all([
                 getActiveServiceNames(),
                 getFollowupServiceNames()
             ]);
-            const procedureValidation = validateProcedureTypes(procedureTypes, allowedServices);
+            const procedureValidation = validateProcedureTypes(servicesResult.procedureTypes, allowedServices);
             if (!procedureValidation.valid) {
                 return res.status(400).json({
                     message: procedureValidation.message,
@@ -989,21 +1044,24 @@ exports.updateBooking = async (req, res, next) => {
                     allowedVisitTypes: procedureValidation.allowedVisitTypes
                 });
             }
-            if (procedureTypes.length > 0) {
+            if (servicesResult.procedureTypes.length > 0) {
                 const allowedLegacy = ['checkup', 'followup', 'consultation'];
-                const clinicOnly = procedureTypes.filter((t) => allowedServices.includes(t));
+                const clinicOnly = servicesResult.procedureTypes.filter((t) => allowedServices.includes(t));
                 if (clinicOnly.length > 0) {
                     booking.visitType = resolveLegacyVisitEnum(clinicOnly, followupServices);
-                    booking.procedureTypes = clinicOnly;
+                    booking.procedureTypes = servicesResult.procedureTypesStorage;
                     booking.procedureType = procedureTypesToLegacyString(clinicOnly);
-                } else if (allowedLegacy.includes(procedureTypes[0])) {
-                    booking.visitType = procedureTypes[0];
+                    servicesTotalForUpdate = servicesResult.servicesTotal;
+                } else if (allowedLegacy.includes(servicesResult.procedureTypes[0])) {
+                    booking.visitType = servicesResult.procedureTypes[0];
                     booking.procedureType = null;
                     booking.procedureTypes = null;
+                    servicesTotalForUpdate = 0;
                 }
             } else {
                 booking.procedureType = null;
                 booking.procedureTypes = null;
+                servicesTotalForUpdate = 0;
             }
         }
 
@@ -1045,11 +1103,12 @@ exports.updateBooking = async (req, res, next) => {
             booking.paymentMethod = paymentValidation.paymentMethod;
             booking.paymentDetails = paymentValidation.paymentDetails;
         }
-        if (hasPaymentPayload || hasTotalAmountPayload) {
-            const totalValidation = resolveTotalAmount(
+        if (hasPaymentPayload || hasTotalAmountPayload || servicesTotalForUpdate !== null) {
+            const totalValidation = resolveBookingTotalAmount(
                 req.body,
                 Number(booking.amountPaid || 0),
                 booking.totalAmount,
+                servicesTotalForUpdate ?? 0,
                 { forUpdate: true }
             );
             if (!totalValidation.valid) {

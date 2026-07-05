@@ -5,6 +5,7 @@ const PDFDocument = require('pdfkit');
 const { QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/database');
 const { PAYMENT_METHODS, PAYMENT_METHOD_LABELS } = require('../constants/paymentMethods');
+const { normalizeStoredProcedureTypes, sumServicePrices } = require('../utils/clinicProcedureHelper');
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_REGEX = /^\d{4}-\d{2}$/;
@@ -382,6 +383,82 @@ async function getDoctorBreakdown(period) {
     }));
 }
 
+async function getServiceBreakdown(period) {
+    const rows = await sequelize.query(
+        `${baseCte()},
+        service_lines AS (
+          SELECT
+            ba.id,
+            ba.collected_amount,
+            ba.total_amount,
+            line.service_name,
+            line.service_price,
+            SUM(line.service_price) OVER (PARTITION BY ba.id) AS booking_service_total,
+            COUNT(*) OVER (PARTITION BY ba.id) AS line_count
+          FROM booking_amounts ba
+          CROSS JOIN LATERAL (
+            SELECT
+              CASE
+                WHEN jsonb_typeof(elem) = 'string' THEN elem #>> '{}'
+                WHEN jsonb_typeof(elem) = 'object' THEN COALESCE(NULLIF(TRIM(elem->>'name'), ''), 'غير محدد')
+                ELSE 'غير محدد'
+              END AS service_name,
+              CASE
+                WHEN jsonb_typeof(elem) = 'object'
+                  AND (elem->>'price') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                THEN (elem->>'price')::numeric
+                ELSE 0
+              END AS service_price
+            FROM jsonb_array_elements(
+              CASE
+                WHEN jsonb_typeof(ba."procedureTypes") = 'array' AND jsonb_array_length(ba."procedureTypes") > 0
+                THEN ba."procedureTypes"
+                WHEN ba."procedureType" IS NOT NULL AND ba."procedureType" <> ''
+                THEN jsonb_build_array(ba."procedureType")
+                ELSE jsonb_build_array('غير محدد')
+              END
+            ) AS elem
+          ) line
+        ),
+        allocated AS (
+          SELECT
+            id,
+            service_name,
+            CASE
+              WHEN booking_service_total > 0 THEN service_price
+              WHEN line_count = 1 THEN total_amount
+              ELSE total_amount / line_count
+            END AS gross_share,
+            CASE
+              WHEN booking_service_total > 0 AND collected_amount > 0
+              THEN collected_amount * (service_price / booking_service_total)
+              WHEN booking_service_total <= 0 AND collected_amount > 0
+              THEN collected_amount / line_count
+              ELSE 0
+            END AS collected_share
+          FROM service_lines
+        )
+        SELECT
+          service_name AS "serviceName",
+          COUNT(DISTINCT id)::int AS "bookingCount",
+          COALESCE(SUM(gross_share), 0)::float AS "grossIncome",
+          COALESCE(SUM(collected_share), 0)::float AS "totalCollected",
+          COALESCE(SUM(gross_share - collected_share), 0)::float AS "totalOutstanding"
+        FROM allocated
+        GROUP BY service_name
+        ORDER BY COALESCE(SUM(collected_share), 0) DESC, service_name ASC;`,
+        { replacements: baseReplacements(period), type: QueryTypes.SELECT }
+    );
+
+    return rows.map((row) => ({
+        serviceName: row.serviceName,
+        grossIncome: roundMoney(row.grossIncome),
+        totalCollected: roundMoney(row.totalCollected),
+        totalOutstanding: roundMoney(Math.max(row.totalOutstanding, 0)),
+        bookingCount: Number(row.bookingCount || 0)
+    }));
+}
+
 async function getValidation(period, summary) {
     const [excludedStatuses] = await sequelize.query(
         `SELECT COUNT(*)::int AS count
@@ -452,13 +529,15 @@ async function getValidation(period, summary) {
 
 async function getFinancialReport(query = {}) {
     const period = parsePeriodRange(query);
-    const [summary, trends, byDoctor] = await Promise.all([
+    const [summary, trends, byDoctor, byService] = await Promise.all([
         getSummary(period),
         getTrends(period),
-        getDoctorBreakdown(period)
+        getDoctorBreakdown(period),
+        getServiceBreakdown(period)
     ]);
     const validation = await getValidation(period, summary);
     summary.byDoctor = byDoctor;
+    summary.byService = byService;
     return {
         period,
         cards: {
@@ -473,6 +552,7 @@ async function getFinancialReport(query = {}) {
         charts: {
             paymentMethodDistribution: summary.paymentBreakdown,
             doctorIncomeDistribution: byDoctor,
+            serviceIncomeDistribution: byService,
             dailyIncome: trends.daily,
             weeklyIncome: trends.weekly,
             monthlyIncome: trends.monthly
@@ -528,6 +608,27 @@ function caseFilters(query = {}, replacements) {
         filters.push('doctor_id = :doctorId');
     }
 
+    const serviceName = String(query.serviceName || query.service || '').trim();
+    if (serviceName) {
+        replacements.serviceName = serviceName;
+        filters.push(`EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof("procedureTypes") = 'array' AND jsonb_array_length("procedureTypes") > 0
+              THEN "procedureTypes"
+              WHEN "procedureType" IS NOT NULL AND "procedureType" <> ''
+              THEN jsonb_build_array("procedureType")
+              ELSE '[]'::jsonb
+            END
+          ) AS elem
+          WHERE (
+            (jsonb_typeof(elem) = 'string' AND elem #>> '{}' = :serviceName)
+            OR (jsonb_typeof(elem) = 'object' AND elem->>'name' = :serviceName)
+          )
+        )`);
+    }
+
     return filters.length ? `WHERE ${filters.join(' AND ')}` : '';
 }
 
@@ -550,6 +651,8 @@ function mapCaseRow(row) {
     const totalAmount = roundMoney(row.bookingValue);
     const amountPaid = roundMoney(row.amountPaid);
     const remainingAmount = roundMoney(row.remainingAmount);
+    const serviceItems = normalizeStoredProcedureTypes(row.procedureTypes, row.service);
+    const servicesTotal = sumServicePrices(serviceItems);
     return {
         bookingId: row.bookingId,
         doctorId: row.doctorId === null ? null : Number(row.doctorId),
@@ -559,6 +662,8 @@ function mapCaseRow(row) {
         phone: row.phone,
         bookingDate: row.bookingDate,
         service: row.service,
+        serviceItems,
+        servicesTotal: servicesTotal > 0 ? servicesTotal : null,
         bookingValue: totalAmount,
         totalAmount,
         amountPaid,
@@ -603,6 +708,7 @@ async function getFinancialCases(query = {}, options = {}) {
           collected_amount::float AS "amountPaid",
           remaining_amount::float AS "remainingAmount",
           payment_status AS "paymentStatus",
+          "procedureTypes",
           normalized_payment_details AS "paymentMethods"
         FROM booking_amounts
         ${filters}
@@ -680,6 +786,14 @@ async function buildExcelReport(query = {}) {
         { header: 'Paid Cases', key: 'fullyPaidCases' },
         { header: 'Outstanding Cases', key: 'outstandingCases' },
         { header: 'Partial Cases', key: 'partialCases' }
+    ]);
+
+    addWorksheetRows(workbook.addWorksheet('Services'), report.summary.byService, [
+        { header: 'Service', key: 'serviceName' },
+        { header: 'Bookings', key: 'bookingCount' },
+        { header: 'Gross Income', key: 'grossIncome' },
+        { header: 'Collected', key: 'totalCollected' },
+        { header: 'Outstanding', key: 'totalOutstanding' }
     ]);
 
     const caseColumns = [

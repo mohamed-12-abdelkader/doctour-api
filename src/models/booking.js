@@ -64,7 +64,7 @@ const Booking = sequelize.define('Booking', {
     procedureTypes: {
         type: DataTypes.JSONB,
         allowNull: true,
-        comment: 'قائمة الخدمات/الإجراءات المختارة للحجز'
+        comment: 'قائمة الخدمات: ["كشف"] أو [{ name, price }]'
     },
     clientRequestId: {
         type: DataTypes.STRING(64),
